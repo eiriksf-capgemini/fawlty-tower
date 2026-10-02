@@ -2,26 +2,92 @@
 
 A hotel full of badly-behaved guests, for testing agentic ops.
 
-`fawlty-tower` is a set of deliberately faulty workloads for a Kubernetes
-cluster. Each "guest" misbehaves in one specific, recognisable way — crashing,
-leaking memory, flapping readiness, spamming logs, making noise on the network,
-fighting GitOps — so your ops agents and alerting have real failures to detect
-and diagnose.
+Fawlty Tower is a **chaos harness**: a small collection of workloads that break
+*on purpose*, in specific and recognisable ways, so you can see whether your
+cluster's observability and ops tooling actually notices and correctly diagnoses
+each failure — before a real incident finds out for you.
 
-One small image ([`Dockerfile`](Dockerfile)) runs every guest; the
-`FAWLTY_GUEST` environment variable picks which one (see
-[`src/fawlty/dispatch.py`](src/fawlty/dispatch.py)). This repo holds the source,
-the image, and the `fawlty` control CLI. The Kubernetes manifests (one
-Deployment per guest, plus the RBAC the API-touching guests need) live in your
-own GitOps or config repo; this repo is deliberately infrastructure-agnostic.
+## What is a chaos harness?
 
-## Nothing runs until you say so
+Chaos engineering is the practice of deliberately injecting faults into a running
+system to learn how it behaves under stress, instead of waiting for an outage to
+teach you the hard way. A *chaos harness* is the tooling that produces those
+faults on demand.
 
-Every guest's Deployment ships at `replicas: 0`. Installing fawlty-tower leaves
-the cluster perfectly healthy. You check a guest in with the `fawlty` CLI, which
-scales it up. If you run Argo CD (or similar), tell it to ignore
-`.spec.replicas` for this app so the toggle stays live and is not reverted by
-selfHeal.
+Most chaos tools test whether the **application** survives — can it tolerate a
+killed pod, a slow dependency, a lost node? Fawlty Tower points the same idea at
+a different target: the **ops layer** that is supposed to be watching. Its guests
+don't exist to see if your app recovers; they exist to generate real, labelled
+failures so you can answer questions like:
+
+- Does my alerting fire on a CrashLoopBackOff, and how fast?
+- Can my dashboards tell a genuine error storm from harmless log noise?
+- When an ops agent (a runbook automation, a `cluster-doctor` CronJob, an
+  LLM-driven diagnoser) looks at the cluster, does it reach the *right*
+  conclusion about what's wrong?
+
+Because every fault here is known in advance, you have ground truth: you know
+exactly what broke, so you can grade whether your tooling got it right.
+
+## How it works
+
+Each **guest** is one fault persona — one container that misbehaves in exactly
+one way. They all run from a single image
+([`Dockerfile`](Dockerfile)); the `FAWLTY_GUEST` environment variable selects
+which persona a given pod runs (see [`src/fawlty/dispatch.py`](src/fawlty/dispatch.py)).
+
+Three things keep this safe to run against a real cluster:
+
+1. **Nothing runs until you say so.** Every guest's Deployment ships at
+   `replicas: 0`. Installing Fawlty Tower leaves the cluster perfectly healthy;
+   you check guests in one at a time.
+2. **Faults are bounded.** Default-tier guests carry small CPU and memory limits,
+   so a fault stays inside its own cgroup and never threatens the node. The
+   network guest only ever calls a fixed allowlist of public sites; the
+   API-touching guests use a namespace-scoped ServiceAccount.
+3. **The dangerous ones are gated.** A separate *node tier* can pressure the node
+   itself (disk, PIDs, host ports) and is off by default and documented as such.
+
+This repo holds the source, the image, and the `fawlty` control CLI. The
+Kubernetes manifests (one Deployment per guest, plus the RBAC the API-touching
+guests need) live in your own GitOps or config repo — Fawlty Tower is
+deliberately infrastructure-agnostic and ships no cluster-specific config.
+
+## Using it
+
+### Prerequisites
+
+- A Kubernetes cluster you are comfortable breaking (a local `kind`, `minikube`,
+  or colima cluster is ideal).
+- `kubectl` pointed at that cluster.
+- A container registry the cluster can pull from.
+- Deployment manifests for the guests in your own config repo (see
+  [Deploying](#deploying)).
+
+### Build the image
+
+```sh
+docker build -t fawlty-tower:test .
+
+# Run any single guest locally to see it misbehave:
+FAWLTY_GUEST=major docker run --rm fawlty-tower:test
+```
+
+Push the image to wherever your cluster pulls from. Every guest runs from this
+one image and differs only by its `FAWLTY_GUEST` env var.
+
+### Deploying
+
+Add one Deployment per guest to your config repo, each at `replicas: 0`, each
+setting `FAWLTY_GUEST` to the guest's name. Give O'Reilly and the Chef a
+ServiceAccount whose RBAC is scoped to the `fawlty-tower` namespace only. If you
+run Argo CD (or similar), tell it to **ignore `.spec.replicas`** for this app, so
+the `fawlty` CLI's live scale toggle is not reverted by selfHeal.
+
+### Checking guests in and out
+
+The `fawlty` CLI is the control surface. It scales a guest's Deployment to 1 to
+check it in and back to 0 to check it out:
 
 ```sh
 fawlty roster                  # who's in, who's out
@@ -32,10 +98,21 @@ fawlty evict-all               # quiet hotel: every guest back to 0
 fawlty panic                   # evict-all, then bounce your real workloads
 ```
 
-`fawlty panic` bounces only the namespaces you name in `FAWLTY_REAL_NS`
-(space-separated, e.g. `export FAWLTY_REAL_NS="argocd my-app"`); unset, it just
-evicts every guest. The CLI needs no knowledge of your cluster beyond a
-`kubectl` context.
+The CLI needs nothing but a working `kubectl` context.
+
+### Recovering
+
+`fawlty evict-all` returns every guest to `replicas: 0`. If a node-tier guest
+disrupted a real workload, `fawlty panic` does an `evict-all` and then restarts
+the deployments in the namespaces you name in `FAWLTY_REAL_NS`:
+
+```sh
+export FAWLTY_REAL_NS="argocd my-app another-app"
+fawlty panic
+```
+
+Unset, `panic` just evicts the guests; it never touches anything you haven't
+explicitly listed.
 
 ## The guests
 
@@ -74,16 +151,13 @@ deployed unless you add them, and still `replicas: 0` after that.
 | **pidbomb** | thread storm toward the PID table (self-capped) |
 | **squatter** | hostNetwork pod squatting node port 80, fighting ingress |
 
-## Building
+## Tuning a guest
 
-```sh
-docker build -t fawlty-tower:test .
-FAWLTY_GUEST=major docker run --rm fawlty-tower:test
-```
-
-Push the image to wherever your cluster pulls from, then roll the pods so they
-pick up the new build. Every guest runs from this one image and differs only by
-its `FAWLTY_GUEST` env var.
+Most guests read a few environment variables so you can dial the fault up or
+down without rebuilding — for example `FAWLTY_FILL_MB` (diskfill's disk budget),
+`FAWLTY_PID_MAX` (pidbomb's thread cap), `FAWLTY_HEALTHY_S` / `FAWLTY_UNHEALTHY_S`
+(Manuel's flap cycle), and `FAWLTY_CPU_WORKERS` (the Kitchen's busy threads). See
+each guest's module under `src/fawlty/guests/` for its knobs and defaults.
 
 ## Adding a guest
 
@@ -91,3 +165,7 @@ its `FAWLTY_GUEST` env var.
 2. Register it in `GUESTS` in `src/fawlty/dispatch.py`.
 3. Add a Deployment (at `replicas: 0`) for it in your manifests.
 4. Add the name to the relevant tier list in the `fawlty` CLI.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
