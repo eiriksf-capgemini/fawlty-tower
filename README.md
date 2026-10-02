@@ -114,6 +114,41 @@ fawlty panic
 Unset, `panic` just evicts the guests; it never touches anything you haven't
 explicitly listed.
 
+## Safety rails
+
+```
+export FAWLTY_ALLOWED_CONTEXTS="kind-fawlty minikube"   # clusters fawlty may touch
+fawlty check-in basil --for 10m     # auto-expires; enforce with `fawlty reap` (cron / loop)
+fawlty check-in basil --for 10m --wait   # block, then check out (Ctrl-C checks out early)
+fawlty check-in --tier node --yes   # node tier needs --yes AND the allowlist
+export FAWLTY_LOG=/tmp/fawlty.log   # "<ts> check-in basil" lines, for time-to-detect
+```
+
+Each check-in/out also stamps `fawlty.io/checked-in-at`, `fawlty.io/checked-out-at`
+and `fawlty.io/expires-at` annotations on the Deployment.
+
+## Grading your ops tooling
+
+`scenarios/scenarios.json` is the ground truth: for every guest, the fault, the
+expected root cause, concept groups a correct diagnosis must cover, and common
+misdiagnoses. `victim` is a negative control: the right answer is "nothing is wrong".
+
+```
+fawlty explain sybil
+echo "Container OOMKilled after memory climbed to its limit; restart loop" | fawlty grade sybil -
+fawlty grade basil diagnosis.txt --strict --json
+```
+
+The keyword grader is a deterministic first gate for CI. For reasoning quality, pass
+`fawlty explain <guest>` plus the agent's output to an LLM judge.
+
+## Tests
+
+```
+python3 -m unittest discover -s tests   # scenario schema + grader
+tests/test_cli.sh                       # CLI behaviour against a stub kubectl
+```
+
 ## The guests
 
 ### Default tier (own namespace, hard-bounded)

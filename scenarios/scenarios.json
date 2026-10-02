@@ -1,0 +1,109 @@
+{
+  "_doc": "Ground truth per guest. Each entry in 'required' is a concept group: a diagnosis matches the group if it contains ANY of the listed phrases (case-insensitive). 'misdiagnoses' are phrases that indicate a wrong conclusion and raise a warning (or fail with --strict). 'expected_remediation' is guidance for human or LLM graders; it is not scored by the keyword grader.",
+  "guests": {
+    "basil": {
+      "tier": "default",
+      "fault": "Exits at random intervals and is restarted by the kubelet.",
+      "root_cause": "Application process crashes repeatedly; pod in CrashLoopBackOff.",
+      "required": [["crashloopbackoff", "crash loop", "crashloop"], ["restart"], ["exit", "crash", "terminated"]],
+      "misdiagnoses": ["node failure", "out of memory", "oomkilled"],
+      "expected_remediation": "Inspect logs/exit code of the previous container; fix or roll back the app."
+    },
+    "sybil": {
+      "tier": "default",
+      "fault": "Allocates memory without releasing it until the cgroup limit kills it.",
+      "root_cause": "Memory leak reaching the container memory limit; OOMKilled then restart loop.",
+      "required": [["oomkilled", "oom killed", "oom-killed", "out of memory", "oom"], ["memory"], ["restart", "crashloop"]],
+      "misdiagnoses": ["node memory pressure", "node is out of memory"],
+      "expected_remediation": "Fix the leak or raise the limit with justification; do not blame the node."
+    },
+    "manuel": {
+      "tier": "default",
+      "fault": "Readiness probe alternates between passing and failing.",
+      "root_cause": "Readiness flapping causing endpoint churn; container itself is not crashing.",
+      "required": [["readiness"], ["flap", "flapping", "intermittent", "not ready", "notready", "unready"], ["endpoint", "traffic", "service"]],
+      "misdiagnoses": ["crashloopbackoff", "oomkilled"],
+      "expected_remediation": "Investigate why the probe fails intermittently; consider probe thresholds."
+    },
+    "kitchen": {
+      "tier": "default",
+      "fault": "Busy-loops on CPU workers to sit at its CPU limit.",
+      "root_cause": "CPU pinned at limit with CFS throttling.",
+      "required": [["cpu"], ["throttl"], ["limit"]],
+      "misdiagnoses": ["memory leak", "node cpu exhaustion"],
+      "expected_remediation": "Right-size CPU limit or reduce workload; throttling is the key signal."
+    },
+    "waiter": {
+      "tier": "default",
+      "fault": "Responds very slowly so probes and clients time out.",
+      "root_cause": "High request latency causing probe timeouts; not a crash.",
+      "required": [["latency", "slow"], ["probe", "timeout", "timed out"]],
+      "misdiagnoses": ["crashloopbackoff", "oomkilled"],
+      "expected_remediation": "Profile the slow path; tune probe timeouts only after fixing latency."
+    },
+    "major": {
+      "tier": "default",
+      "fault": "Continuously issues GET requests to an allowlisted set of public sites.",
+      "root_cause": "Constant outbound/egress request traffic; benign targets.",
+      "required": [["outbound", "egress", "external"], ["constant", "continuous", "steady", "repeated", "high rate", "high volume"]],
+      "misdiagnoses": ["data exfiltration", "compromised", "breach"],
+      "expected_remediation": "Confirm the destinations are expected; apply egress policy if undesired."
+    },
+    "polly": {
+      "tier": "default",
+      "fault": "Emits a high volume of benign ERROR/WARN log lines.",
+      "root_cause": "Log storm of benign messages; no functional impact.",
+      "required": [["log"], ["error", "warn"], ["storm", "volume", "noise", "spam", "flood", "verbose"], ["benign", "harmless", "no impact", "not an outage", "no functional", "healthy", "noise"]],
+      "misdiagnoses": ["application outage", "service is down", "critical failure"],
+      "expected_remediation": "Do not page on log volume alone; correlate with real error rates."
+    },
+    "oreilly": {
+      "tier": "default",
+      "fault": "Spams Kubernetes Events and creates a flood of short-lived Jobs.",
+      "root_cause": "Event spam and Job churn originating from a workload with API access.",
+      "required": [["event"], ["job"], ["spam", "flood", "storm", "churn", "burst"]],
+      "misdiagnoses": ["node failure"],
+      "expected_remediation": "Identify the creating ServiceAccount/pod; restrict RBAC and add quotas."
+    },
+    "chef": {
+      "tier": "default",
+      "fault": "Patches its own Deployment, fighting GitOps self-heal.",
+      "root_cause": "In-cluster actor modifying its Deployment and a GitOps controller reverting it (drift/reconcile fight).",
+      "required": [["deployment"], ["patch", "modif", "scale", "replicas", "mutat"], ["argo", "selfheal", "self-heal", "gitops", "drift", "reconcil", "fight"]],
+      "misdiagnoses": ["crashloopbackoff"],
+      "expected_remediation": "Find the writer via audit/managedFields; restrict RBAC or ignoreDifferences."
+    },
+    "victim": {
+      "tier": "default",
+      "fault": "None. Stable HTTP target; a NEGATIVE CONTROL.",
+      "root_cause": "Healthy workload. Correct answer is that nothing is wrong with it.",
+      "required": [["healthy", "no issue", "no fault", "nothing wrong", "stable", "normal", "no problem"]],
+      "misdiagnoses": ["crashloopbackoff", "oomkilled", "outage", "failing", "unhealthy"],
+      "expected_remediation": "None. Penalise agents that invent a problem."
+    },
+    "diskfill": {
+      "tier": "node",
+      "fault": "Writes ballast to a node hostPath toward DiskPressure.",
+      "root_cause": "Node disk filling from a hostPath writer; DiskPressure and eviction risk.",
+      "required": [["disk"], ["pressure", "diskpressure", "hostpath", "ephemeral", "full", "evict"]],
+      "misdiagnoses": ["memory leak"],
+      "expected_remediation": "Find the writer, free space, check kubelet eviction thresholds."
+    },
+    "pidbomb": {
+      "tier": "node",
+      "fault": "Spawns threads toward the PID table limit (self-capped).",
+      "root_cause": "PID/thread exhaustion pressure.",
+      "required": [["pid", "thread"], ["limit", "exhaust", "table", "storm", "pressure", "fork"]],
+      "misdiagnoses": ["memory leak", "cpu throttling"],
+      "expected_remediation": "Set pod pids limits; identify the thread-spawning process."
+    },
+    "squatter": {
+      "tier": "node",
+      "fault": "hostNetwork pod binds node port 80, fighting ingress.",
+      "root_cause": "Host port 80 conflict from a hostNetwork pod interfering with the ingress controller.",
+      "required": [["hostnetwork", "host network", "hostport", "port 80"], ["ingress", "conflict", "bind", "address already in use", "squat"]],
+      "misdiagnoses": ["dns failure"],
+      "expected_remediation": "Remove hostNetwork pod; enforce Pod Security / admission policy against hostNetwork."
+    }
+  }
+}
