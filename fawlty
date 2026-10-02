@@ -6,23 +6,24 @@
 # If you run Argo CD, tell it to ignore .spec.replicas for this app so the live
 # toggle is not reverted by selfHeal.
 #
-#   fawlty roster                 # who's in, who's out
-#   fawlty check-in basil sybil   # start one or more guests
-#   fawlty check-out basil        # stop one or more guests
-#   fawlty check-in --tier node   # start a whole tier (default | node)
-#   fawlty check-out --tier all   # stop everything in a tier
-#   fawlty evict-all              # quiet hotel: every guest to 0
-#   fawlty panic                  # evict-all + bounce your real workloads
+# Usage: run `fawlty help` (text lives in usage() below).
 #
-# panic bounces only the namespaces named in FAWLTY_REAL_NS (space-separated);
-# unset, it just evicts every guest. Requires kubectl pointed at the target
-# cluster.
+# Environment:
+#   FAWLTY_ALLOWED_CONTEXTS  space-separated kubectl contexts this tool may act
+#                            on. REQUIRED for node-tier guests; strongly advised.
+#   FAWLTY_REAL_NS           namespaces bounced by `panic` (space-separated).
+#   FAWLTY_ASSUME_YES=1      same as --yes.
+#   FAWLTY_LOG=<file>        append "<iso-ts> <action> <guest>" lines, so you can
+#                            compute time-to-detect against your alerting.
+#   FAWLTY_NS                namespace holding the guests (default fawlty-tower).
 set -euo pipefail
 
-NS=fawlty-tower
+NS=${FAWLTY_NS:-fawlty-tower}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 # Namespaces of YOUR real workloads, bounced by `panic` to recover after a test.
-# Empty by default so fawlty needs no knowledge of your cluster; opt in with:
-#   export FAWLTY_REAL_NS="argocd my-app another-app"
+# Empty by default so fawlty needs no knowledge of your cluster.
+# shellcheck disable=SC2206
 REAL_NS=(${FAWLTY_REAL_NS:-})
 
 DEFAULT_GUESTS=(basil sybil manuel kitchen waiter major polly oreilly chef victim)
@@ -32,11 +33,38 @@ ALL_GUESTS=("${DEFAULT_GUESTS[@]}" "${NODE_GUESTS[@]}")
 die() { echo "fawlty: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+usage() {
+  cat <<'USAGE'
+fawlty -- check chaos guests in and out.
+
+  fawlty roster                         who's in, who's out (and any TTL)
+  fawlty check-in  <guest...>           start guests            [--for 10m] [--wait]
+  fawlty check-in  --tier default|node|all   start a tier       [--yes for node/all]
+  fawlty check-out <guest...|--tier T>  stop guests
+  fawlty evict-all                      quiet hotel: every guest to 0
+  fawlty reap                           check out guests whose --for TTL expired
+  fawlty panic                          evict-all + bounce FAWLTY_REAL_NS workloads
+  fawlty grade <guest> <file|->         score a diagnosis against scenarios/
+  fawlty explain <guest>                show the expected diagnosis for a guest
+
+Flags: --tier T, --for DURATION (90s|10m|2h), --wait (block, then check out), --yes
+Node-tier guests need --yes AND FAWLTY_ALLOWED_CONTEXTS set.
+USAGE
+}
+
 is_guest() {
   local g="$1" x
   for x in "${ALL_GUESTS[@]}"; do [ "$x" = "$g" ] && return 0; done
   return 1
 }
+
+is_node_guest() {
+  local g="$1" x
+  for x in "${NODE_GUESTS[@]}"; do [ "$x" = "$g" ] && return 0; done
+  return 1
+}
+
+tier_of() { if is_node_guest "$1"; then echo node; else echo default; fi; }
 
 tier_guests() {
   case "$1" in
@@ -47,85 +75,227 @@ tier_guests() {
   esac
 }
 
-scale() {
-  local guest="$1" n="$2"
-  if ! kubectl -n "$NS" get deploy "$guest" >/dev/null 2>&1; then
-    echo "  $guest: not deployed (node-tier guests must be deployed first; they are gated off by default)"
-    return 0
-  fi
-  kubectl -n "$NS" scale deploy "$guest" --replicas="$n" >/dev/null
-  echo "  $guest -> replicas=$n"
+to_seconds() {
+  local d="$1" n unit
+  [[ "$d" =~ ^([0-9]+)([smh]?)$ ]] || die "bad duration '$d' (use e.g. 90s, 10m, 2h)"
+  n=${BASH_REMATCH[1]}
+  unit=${BASH_REMATCH[2]:-s}
+  case "${unit:-s}" in
+    s) echo "$n" ;;
+    m) echo $((n * 60)) ;;
+    h) echo $((n * 3600)) ;;
+  esac
 }
 
-cmd_roster() {
-  printf '%-10s %-8s %-9s %s\n' GUEST TIER REPLICAS READY
-  local g tier want ready
-  for g in "${ALL_GUESTS[@]}"; do
-    for tier in default node; do
-      case " $(tier_guests "$tier" | tr '\n' ' ') " in *" $g "*) break;; esac
-    done
-    if kubectl -n "$NS" get deploy "$g" >/dev/null 2>&1; then
-      want=$(kubectl -n "$NS" get deploy "$g" -o jsonpath='{.spec.replicas}' 2>/dev/null)
-      ready=$(kubectl -n "$NS" get deploy "$g" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
-      printf '%-10s %-8s %-9s %s\n' "$g" "$tier" "${want:-0}" "${ready:-0}"
+# Refuse to act on a cluster that isn't explicitly allowed.
+# $1 = "strict" makes an unset allowlist fatal (used for node tier).
+guard_context() {
+  local mode="${1:-}" ctx c ok=0
+  ctx=$(kubectl config current-context 2>/dev/null) || die "no current kubectl context"
+  if [ -n "${FAWLTY_ALLOWED_CONTEXTS:-}" ]; then
+    for c in $FAWLTY_ALLOWED_CONTEXTS; do [ "$c" = "$ctx" ] && ok=1; done
+    [ "$ok" -eq 1 ] || die "context '$ctx' is not in FAWLTY_ALLOWED_CONTEXTS ($FAWLTY_ALLOWED_CONTEXTS)"
+  elif [ "$mode" = strict ]; then
+    die "node-tier guests need FAWLTY_ALLOWED_CONTEXTS set (current context: '$ctx')"
+  else
+    echo "fawlty: warning: FAWLTY_ALLOWED_CONTEXTS not set; acting on context '$ctx'" >&2
+  fi
+}
+
+log_event() {
+  [ -n "${FAWLTY_LOG:-}" ] || return 0
+  printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" >> "$FAWLTY_LOG"
+}
+
+# scale <guest> <n> [ttl_seconds]   returns 0 ok, 2 not deployed
+scale() {
+  local guest="$1" n="$2" ttl="${3:-}" now
+  if ! kubectl -n "$NS" get deploy "$guest" >/dev/null 2>&1; then
+    echo "  $guest: NOT DEPLOYED (add its Deployment to your manifests; node-tier is gated off by default)" >&2
+    return 2
+  fi
+  kubectl -n "$NS" scale deploy "$guest" --replicas="$n" >/dev/null
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [ "$n" -gt 0 ]; then
+    if [ -n "$ttl" ]; then
+      kubectl -n "$NS" annotate deploy "$guest" --overwrite \
+        "fawlty.io/checked-in-at=$now" "fawlty.io/expires-at=$(( $(date +%s) + ttl ))" >/dev/null
     else
-      printf '%-10s %-8s %-9s %s\n' "$g" "$tier" "-" "(not deployed)"
+      kubectl -n "$NS" annotate deploy "$guest" --overwrite \
+        "fawlty.io/checked-in-at=$now" "fawlty.io/expires-at-" >/dev/null 2>&1 || true
     fi
+    log_event check-in "$guest"
+  else
+    kubectl -n "$NS" annotate deploy "$guest" --overwrite \
+      "fawlty.io/checked-out-at=$now" "fawlty.io/expires-at-" >/dev/null 2>&1 || true
+    log_event check-out "$guest"
+  fi
+  echo "  $guest -> replicas=$n${ttl:+ (expires in ${ttl}s)}"
+}
+
+DEPLOY_COLUMNS='NAME:.metadata.name,REPLICAS:.spec.replicas,READY:.status.readyReplicas,EXPIRES:.metadata.annotations.fawlty\.io/expires-at'
+
+cmd_roster() {
+  local rows g tier row want ready exp now remaining
+  # One API call instead of three per guest.
+  rows=$(kubectl -n "$NS" get deploy -o custom-columns="$DEPLOY_COLUMNS" --no-headers 2>/dev/null || true)
+  now=$(date +%s)
+  printf '%-10s %-8s %-9s %-6s %s\n' GUEST TIER REPLICAS READY TTL
+  for g in "${ALL_GUESTS[@]}"; do
+    tier=$(tier_of "$g")
+    row=$(printf '%s\n' "$rows" | awk -v g="$g" '$1==g {print $2, $3, $4}')
+    if [ -z "$row" ]; then
+      printf '%-10s %-8s %-9s %-6s %s\n' "$g" "$tier" "-" "-" "(not deployed)"
+      continue
+    fi
+    read -r want ready exp <<<"$row"
+    [ "$want" = "<none>" ] && want=0
+    [ "$ready" = "<none>" ] && ready=0
+    remaining="-"
+    if [[ "$exp" =~ ^[0-9]+$ ]]; then
+      remaining="$(( exp - now ))s"
+    fi
+    printf '%-10s %-8s %-9s %-6s %s\n' "$g" "$tier" "$want" "$ready" "$remaining"
   done
+}
+
+# Parsed by parse_targets
+TARGETS=(); TIER=""; FOR=""; WAIT=0; ASSUME_YES=${FAWLTY_ASSUME_YES:-0}
+
+parse_targets() {
+  TARGETS=(); TIER=""; FOR=""; WAIT=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tier) [ "$#" -ge 2 ] || die "--tier needs a value (default|node|all)"; TIER="$2"; shift 2 ;;
+      --for)  [ "$#" -ge 2 ] || die "--for needs a duration (e.g. 10m)"; FOR="$2"; shift 2 ;;
+      --wait) WAIT=1; shift ;;
+      --yes|-y) ASSUME_YES=1; shift ;;
+      -*) die "unknown flag '$1' (try: fawlty help)" ;;
+      *) is_guest "$1" || die "unknown guest '$1' (try: fawlty roster)"; TARGETS+=("$1"); shift ;;
+    esac
+  done
+  if [ -n "$TIER" ]; then
+    local g
+    while read -r g; do TARGETS+=("$g"); done < <(tier_guests "$TIER")
+  fi
+  [ "${#TARGETS[@]}" -gt 0 ] || die "need a guest name or --tier <default|node|all>"
 }
 
 cmd_check() {
   local action="$1"; shift
-  local n; [ "$action" = check-in ] && n=1 || n=0
-  [ "$#" -gt 0 ] || die "$action needs a guest name or --tier <default|node|all>"
-  if [ "$1" = "--tier" ]; then
-    [ "$#" -eq 2 ] || die "usage: $action --tier <default|node|all>"
-    echo "$action tier '$2':"
-    local g; while read -r g; do scale "$g" "$n"; done < <(tier_guests "$2")
-    return
+  local n=0 ttl="" g rc failed=0 has_node=0
+  [ "$action" = check-in ] && n=1
+  parse_targets "$@"
+  [ -z "$FOR" ] || ttl=$(to_seconds "$FOR")
+  [ "$WAIT" -eq 0 ] || [ -n "$ttl" ] || die "--wait requires --for <duration>"
+  [ "$n" -eq 1 ] || { [ -z "$ttl" ] && [ "$WAIT" -eq 0 ]; } || die "--for/--wait only apply to check-in"
+
+  if [ "$n" -eq 1 ]; then
+    for g in "${TARGETS[@]}"; do is_node_guest "$g" && has_node=1; done
+    if [ "$has_node" -eq 1 ]; then
+      guard_context strict
+      [ "$ASSUME_YES" = 1 ] || die "node-tier guests can disrupt the node; re-run with --yes to confirm"
+    else
+      guard_context
+    fi
+  else
+    guard_context
   fi
+
   echo "$action:"
-  local g
-  for g in "$@"; do
-    is_guest "$g" || die "unknown guest '$g' (try: fawlty roster)"
-    scale "$g" "$n"
+  for g in "${TARGETS[@]}"; do
+    rc=0; scale "$g" "$n" "$ttl" || rc=$?
+    [ "$rc" -eq 0 ] || failed=1
   done
+
+  if [ "$WAIT" -eq 1 ] && [ "$failed" -eq 0 ]; then
+    echo "waiting ${FOR} (Ctrl-C checks the guests out early)..."
+    # shellcheck disable=SC2064
+    trap "echo; echo 'checking out:'; for x in ${TARGETS[*]}; do scale \"\$x\" 0 || true; done" EXIT
+    sleep "$ttl"
+  fi
+  return "$failed"
 }
 
 cmd_evict_all() {
+  local g rc failed=0
+  guard_context
   echo "evicting all guests (quiet hotel):"
-  local g; for g in "${ALL_GUESTS[@]}"; do scale "$g" 0; done
+  for g in "${ALL_GUESTS[@]}"; do
+    rc=0; scale "$g" 0 || rc=$?
+    # "not deployed" is expected when node tier was never installed.
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ] || failed=1
+  done
+  return "$failed"
+}
+
+cmd_reap() {
+  local rows now name exp
+  guard_context
+  rows=$(kubectl -n "$NS" get deploy -o custom-columns="$DEPLOY_COLUMNS" --no-headers 2>/dev/null || true)
+  now=$(date +%s)
+  echo "reaping expired guests:"
+  while read -r name _ _ exp; do
+    [ -n "$name" ] || continue
+    [[ "$exp" =~ ^[0-9]+$ ]] || continue
+    if [ "$exp" -le "$now" ] && is_guest "$name"; then
+      scale "$name" 0 || true
+    fi
+  done <<<"$rows"
 }
 
 cmd_panic() {
-  cmd_evict_all
+  local rc=0 ns kind out
+  cmd_evict_all || rc=$?
   if [ "${#REAL_NS[@]}" -eq 0 ]; then
     echo "no real workloads configured to bounce (set FAWLTY_REAL_NS='ns1 ns2' to enable)"
-    return
+    return "$rc"
   fi
   echo "bouncing the real workloads to recover:"
-  local ns
   for ns in "${REAL_NS[@]}"; do
-    if kubectl get ns "$ns" >/dev/null 2>&1; then
-      kubectl -n "$ns" rollout restart deploy --all >/dev/null 2>&1 \
-        && echo "  restarted deployments in $ns" \
-        || echo "  nothing to restart in $ns"
+    if ! kubectl get ns "$ns" >/dev/null 2>&1; then
+      echo "  $ns: namespace not found, skipped" >&2
+      continue
     fi
+    for kind in deployment statefulset daemonset; do
+      # No name restarts every resource of that kind in the namespace; `rollout
+      # restart` has no --all flag, and an empty kind exits 0 ("No resources found").
+      if out=$(kubectl -n "$ns" rollout restart "$kind" 2>&1); then
+        echo "  $ns: restarted ${kind}s"
+      else
+        echo "  $ns: $kind restart FAILED: $out" >&2
+        rc=1
+      fi
+    done
   done
+  return "$rc"
 }
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+cmd_grade() {
+  have python3 || die "python3 not found (needed for grade/explain)"
+  python3 "$SCRIPT_DIR/scripts/grade.py" "$@"
+}
+
+cmd_explain() {
+  [ "$#" -eq 1 ] || die "usage: fawlty explain <guest>"
+  cmd_grade --show "$1"
+}
 
 main() {
-  have kubectl || die "kubectl not found on PATH"
   local cmd="${1:-roster}"; shift || true
+  case "$cmd" in
+    -h|--help|help) usage; return 0 ;;
+    grade) cmd_grade "$@"; return ;;
+    explain) cmd_explain "$@"; return ;;
+  esac
+  have kubectl || die "kubectl not found on PATH"
   case "$cmd" in
     roster|ls|status) cmd_roster ;;
     check-in|in)      cmd_check check-in "$@" ;;
     check-out|out)    cmd_check check-out "$@" ;;
     evict-all|evict)  cmd_evict_all ;;
+    reap)             cmd_reap ;;
     panic)            cmd_panic ;;
-    -h|--help|help)   usage ;;
     *) die "unknown command '$cmd' (try: fawlty help)" ;;
   esac
 }
