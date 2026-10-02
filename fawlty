@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# fawlty -- check chaos guests in and out of the Fawlty Towers.
+#
+# Every guest is a Deployment in the `fawlty-tower` namespace that ships at
+# replicas: 0. Checking a guest in scales it to 1; checking out scales to 0.
+# If you run Argo CD, tell it to ignore .spec.replicas for this app so the live
+# toggle is not reverted by selfHeal.
+#
+#   fawlty roster                 # who's in, who's out
+#   fawlty check-in basil sybil   # start one or more guests
+#   fawlty check-out basil        # stop one or more guests
+#   fawlty check-in --tier node   # start a whole tier (default | node)
+#   fawlty check-out --tier all   # stop everything in a tier
+#   fawlty evict-all              # quiet hotel: every guest to 0
+#   fawlty panic                  # evict-all + bounce your real workloads
+#
+# panic bounces only the namespaces named in FAWLTY_REAL_NS (space-separated);
+# unset, it just evicts every guest. Requires kubectl pointed at the target
+# cluster.
+set -euo pipefail
+
+NS=fawlty-tower
+# Namespaces of YOUR real workloads, bounced by `panic` to recover after a test.
+# Empty by default so fawlty needs no knowledge of your cluster; opt in with:
+#   export FAWLTY_REAL_NS="argocd my-app another-app"
+REAL_NS=(${FAWLTY_REAL_NS:-})
+
+DEFAULT_GUESTS=(basil sybil manuel kitchen waiter major polly oreilly chef victim)
+NODE_GUESTS=(diskfill pidbomb squatter)
+ALL_GUESTS=("${DEFAULT_GUESTS[@]}" "${NODE_GUESTS[@]}")
+
+die() { echo "fawlty: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+is_guest() {
+  local g="$1" x
+  for x in "${ALL_GUESTS[@]}"; do [ "$x" = "$g" ] && return 0; done
+  return 1
+}
+
+tier_guests() {
+  case "$1" in
+    default) printf '%s\n' "${DEFAULT_GUESTS[@]}" ;;
+    node)    printf '%s\n' "${NODE_GUESTS[@]}" ;;
+    all)     printf '%s\n' "${ALL_GUESTS[@]}" ;;
+    *) die "unknown tier '$1' (use: default | node | all)" ;;
+  esac
+}
+
+scale() {
+  local guest="$1" n="$2"
+  if ! kubectl -n "$NS" get deploy "$guest" >/dev/null 2>&1; then
+    echo "  $guest: not deployed (node-tier guests must be deployed first; they are gated off by default)"
+    return 0
+  fi
+  kubectl -n "$NS" scale deploy "$guest" --replicas="$n" >/dev/null
+  echo "  $guest -> replicas=$n"
+}
+
+cmd_roster() {
+  printf '%-10s %-8s %-9s %s\n' GUEST TIER REPLICAS READY
+  local g tier want ready
+  for g in "${ALL_GUESTS[@]}"; do
+    for tier in default node; do
+      case " $(tier_guests "$tier" | tr '\n' ' ') " in *" $g "*) break;; esac
+    done
+    if kubectl -n "$NS" get deploy "$g" >/dev/null 2>&1; then
+      want=$(kubectl -n "$NS" get deploy "$g" -o jsonpath='{.spec.replicas}' 2>/dev/null)
+      ready=$(kubectl -n "$NS" get deploy "$g" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+      printf '%-10s %-8s %-9s %s\n' "$g" "$tier" "${want:-0}" "${ready:-0}"
+    else
+      printf '%-10s %-8s %-9s %s\n' "$g" "$tier" "-" "(not deployed)"
+    fi
+  done
+}
+
+cmd_check() {
+  local action="$1"; shift
+  local n; [ "$action" = check-in ] && n=1 || n=0
+  [ "$#" -gt 0 ] || die "$action needs a guest name or --tier <default|node|all>"
+  if [ "$1" = "--tier" ]; then
+    [ "$#" -eq 2 ] || die "usage: $action --tier <default|node|all>"
+    echo "$action tier '$2':"
+    local g; while read -r g; do scale "$g" "$n"; done < <(tier_guests "$2")
+    return
+  fi
+  echo "$action:"
+  local g
+  for g in "$@"; do
+    is_guest "$g" || die "unknown guest '$g' (try: fawlty roster)"
+    scale "$g" "$n"
+  done
+}
+
+cmd_evict_all() {
+  echo "evicting all guests (quiet hotel):"
+  local g; for g in "${ALL_GUESTS[@]}"; do scale "$g" 0; done
+}
+
+cmd_panic() {
+  cmd_evict_all
+  if [ "${#REAL_NS[@]}" -eq 0 ]; then
+    echo "no real workloads configured to bounce (set FAWLTY_REAL_NS='ns1 ns2' to enable)"
+    return
+  fi
+  echo "bouncing the real workloads to recover:"
+  local ns
+  for ns in "${REAL_NS[@]}"; do
+    if kubectl get ns "$ns" >/dev/null 2>&1; then
+      kubectl -n "$ns" rollout restart deploy --all >/dev/null 2>&1 \
+        && echo "  restarted deployments in $ns" \
+        || echo "  nothing to restart in $ns"
+    fi
+  done
+}
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+
+main() {
+  have kubectl || die "kubectl not found on PATH"
+  local cmd="${1:-roster}"; shift || true
+  case "$cmd" in
+    roster|ls|status) cmd_roster ;;
+    check-in|in)      cmd_check check-in "$@" ;;
+    check-out|out)    cmd_check check-out "$@" ;;
+    evict-all|evict)  cmd_evict_all ;;
+    panic)            cmd_panic ;;
+    -h|--help|help)   usage ;;
+    *) die "unknown command '$cmd' (try: fawlty help)" ;;
+  esac
+}
+
+main "$@"
