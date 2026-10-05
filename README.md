@@ -123,8 +123,8 @@ explicitly listed.
 ## Safety rails
 
 ```
-export FAWLTY_ALLOWED_CONTEXTS="kind-fawlty minikube"   # clusters fawlty may touch
-fawlty check-in basil --for 10m     # auto-expires; enforce with `fawlty reap` (cron / loop)
+export FAWLTY_ALLOWED_CONTEXTS="kind-fawlty minikube"   # clusters fawlty may touch (required)
+fawlty check-in basil --for 10m     # marks an expiry; only enforced when `fawlty reap` runs (cron / loop)
 fawlty check-in basil --for 10m --wait   # block, then check out (Ctrl-C checks out early)
 fawlty check-in --tier node --yes   # node tier needs --yes AND the allowlist
 export FAWLTY_LOG=/tmp/fawlty.log   # "<ts> check-in basil" lines, for time-to-detect
@@ -132,6 +132,13 @@ export FAWLTY_LOG=/tmp/fawlty.log   # "<ts> check-in basil" lines, for time-to-d
 
 Each check-in/out also stamps `fawlty.io/checked-in-at`, `fawlty.io/checked-out-at`
 and `fawlty.io/expires-at` annotations on the Deployment.
+
+Every command that changes the cluster refuses to run unless the current
+kubectl context is in `FAWLTY_ALLOWED_CONTEXTS`. For a throwaway local cluster
+you can opt out with `FAWLTY_ALLOW_ANY_CONTEXT=1` (default tier only; the node
+tier always needs the allowlist). The context is resolved once at start-up and
+passed as `--context` to every kubectl call, so switching contexts in another
+terminal during `--wait` cannot redirect the final check-out to another cluster.
 
 ## Grading your ops tooling
 
