@@ -242,7 +242,10 @@ deployed unless you add them, and still `replicas: 0` after that.
 Most guests read a few environment variables so you can dial the fault up or
 down without rebuilding — for example `FAWLTY_FILL_MB` (diskfill's disk budget),
 `FAWLTY_PID_MAX` (pidbomb's thread cap), `FAWLTY_HEALTHY_S` / `FAWLTY_UNHEALTHY_S`
-(Manuel's flap cycle), and `FAWLTY_CPU_WORKERS` (the Kitchen's busy threads). See
+(Manuel's flap cycle), `FAWLTY_CPU_WORKERS` (the Kitchen's busy workers),
+`FAWLTY_LEAK_CHUNK_MB` / `FAWLTY_LEAK_INTERVAL_S` / `FAWLTY_MAX_MB` (Sybil's leak
+rate and self-cap; keep the cap above her memory limit) and `FAWLTY_LOG_RATE`
+(Polly's lines per second, 1–1000). See
 each guest's module under `src/fawlty/guests/` for its knobs and defaults.
 
 ## Adding a guest
