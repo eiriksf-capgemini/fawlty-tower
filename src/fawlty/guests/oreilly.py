@@ -8,17 +8,32 @@ or a stuck controller produces.
 Strictly in-namespace: bind it an RBAC Role that permits only Events and Jobs
 in the fawlty-tower namespace. If the token isn't present (running outside the
 cluster) it degrades to log-only.
+
+The Jobs are built to pass Pod Security Admission at the `restricted` level
+(non-root, no privilege escalation, all capabilities dropped, RuntimeDefault
+seccomp, no service-account token), so a hardened namespace sees the intended
+Job flood rather than a stream of admission rejections. Their image comes from
+FAWLTY_JOB_IMAGE (default busybox:1.36): point it at your registry mirror on
+air-gapped clusters or to avoid Docker Hub rate limits.
+
+Events reference the real pod (POD_NAME / POD_UID from the downward API, falling
+back to the hostname, which Kubernetes sets to the pod name), so `kubectl
+describe pod` shows them and an agent can trace the spam back to its source.
 """
 from __future__ import annotations
 
 import datetime as dt
+import os
 import random
+import socket
 import uuid
 
 from fawlty import blind, common
 
 EVENT_INTERVAL_S = 3.0
 JOB_INTERVAL_S = 15.0
+JOB_IMAGE = os.environ.get("FAWLTY_JOB_IMAGE", "busybox:1.36")
+JOB_UID = 65534  # "nobody": busybox needs nothing more for echo + sleep
 
 REASONS = ["BuildingSomething", "KnockedItDown", "WrongWall", "SatisfiedCustomer", "Oops"]
 # Blind mode: plausible controller-ish reasons that do not name the fault.
@@ -71,7 +86,10 @@ def _emit_event(core, ns: str, reason: str, log) -> None:
     name = f"{_me()}-{uuid.uuid4().hex[:8]}"
     body = client.CoreV1Event(
         metadata=client.V1ObjectMeta(name=name, namespace=ns),
-        involved_object=client.V1ObjectReference(kind="Pod", namespace=ns, name="oreilly"),
+        involved_object=client.V1ObjectReference(
+            kind="Pod", namespace=ns, name=os.environ.get("POD_NAME") or socket.gethostname(),
+            uid=os.environ.get("POD_UID") or None,
+        ),
         reason=reason,
         message=blind.text(f"O'Reilly did a thing: {reason}", f"{reason} completed"),
         type="Warning",
@@ -103,11 +121,23 @@ def _spawn_job(batch, ns: str, log) -> None:
                 metadata=client.V1ObjectMeta(labels={"app": _me()}),
                 spec=client.V1PodSpec(
                     restart_policy="Never",
+                    automount_service_account_token=False,
+                    security_context=client.V1PodSecurityContext(
+                        run_as_non_root=True,
+                        run_as_user=JOB_UID,
+                        run_as_group=JOB_UID,
+                        seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault"),
+                    ),
                     containers=[
                         client.V1Container(
                             name="work",
-                            image="busybox:1.36",
+                            image=JOB_IMAGE,
                             command=["sh", "-c", "echo building...; sleep 2; echo done"],
+                            security_context=client.V1SecurityContext(
+                                allow_privilege_escalation=False,
+                                read_only_root_filesystem=True,
+                                capabilities=client.V1Capabilities(drop=["ALL"]),
+                            ),
                             resources=client.V1ResourceRequirements(
                                 requests={"cpu": "5m", "memory": "8Mi"},
                                 limits={"cpu": "50m", "memory": "32Mi"},

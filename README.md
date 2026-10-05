@@ -224,6 +224,10 @@ The Major only ever issues GETs against a fixed allowlist of harmless public
 sites (`src/fawlty/common.py`); it is never pointed at an arbitrary host.
 O'Reilly and the Chef touch the Kubernetes API through a ServiceAccount whose
 RBAC should be scoped to the `fawlty-tower` namespace only.
+O'Reilly's Jobs pass Pod Security Admission at `restricted`; set
+`FAWLTY_JOB_IMAGE` to a mirror if your cluster can't pull `busybox:1.36` from
+Docker Hub, and pass `POD_NAME`/`POD_UID` via the downward API so his Events
+point at his real pod.
 
 ### Node tier (gated, off by default)
 
