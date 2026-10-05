@@ -76,6 +76,12 @@ FAWLTY_GUEST=major docker run --rm fawlty-tower:test
 Push the image to wherever your cluster pulls from. Every guest runs from this
 one image and differs only by its `FAWLTY_GUEST` env var.
 
+The image runs as uid `10001`, not root. Default-tier guests need nothing more
+and work with `runAsNonRoot: true` and `readOnlyRootFilesystem: true`. The
+node-tier guests that need root (squatter on host port 80, diskfill on a
+root-owned hostPath) must say so in their Deployment with
+`securityContext: {runAsUser: 0}`.
+
 ### Deploying
 
 Add one Deployment per guest to your config repo, each at `replicas: 0`, each
