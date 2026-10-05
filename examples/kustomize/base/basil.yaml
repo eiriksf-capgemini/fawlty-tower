@@ -1,0 +1,40 @@
+# Basil: random crashes -> CrashLoopBackOff. No probes needed: the process exits.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: basil
+  labels:
+    app.kubernetes.io/name: basil
+    app.kubernetes.io/part-of: fawlty-tower
+spec:
+  replicas: 0  # checked in/out live by the `fawlty` CLI; tell Argo CD to ignore it
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: basil
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: basil
+        app.kubernetes.io/part-of: fawlty-tower
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: guest
+          image: fawlty-tower
+          env:
+            - {name: FAWLTY_GUEST, value: "basil"}
+            - {name: FAWLTY_MIN_UPTIME_S, value: "5"}
+            - {name: FAWLTY_MAX_UPTIME_S, value: "40"}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

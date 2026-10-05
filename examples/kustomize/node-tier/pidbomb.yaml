@@ -1,0 +1,40 @@
+# pidbomb: spawns up to FAWLTY_PID_MAX threads.
+#
+# NOTE: Kubernetes has no per-pod PID limit in the Pod spec. The real bounds are
+# (1) FAWLTY_PID_MAX, the guest's own cap, and (2) the kubelet's podPidsLimit
+# (KubeletConfiguration / --pod-max-pids), which is node-wide and set by your
+# cluster admin. Check that podPidsLimit is set before checking pidbomb in, and
+# keep FAWLTY_PID_MAX well below the node's pid_max.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pidbomb
+  labels: {app.kubernetes.io/name: pidbomb, app.kubernetes.io/part-of: fawlty-tower, fawlty.io/tier: node}
+spec:
+  replicas: 0
+  selector:
+    matchLabels: {app.kubernetes.io/name: pidbomb}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: pidbomb, app.kubernetes.io/part-of: fawlty-tower}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: guest
+          image: fawlty-tower
+          env:
+            - {name: FAWLTY_GUEST, value: pidbomb}
+            - {name: FAWLTY_PID_MAX, value: "2000"}
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {cpu: 200m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

@@ -1,0 +1,33 @@
+# Node tier: the guests that pressure the NODE, not just their own pod.
+# Applying this overlay is the first gate; each Deployment still ships at
+# replicas: 0, and `fawlty check-in` additionally needs --yes and
+# FAWLTY_ALLOWED_CONTEXTS. On a single-node cluster these can evict Argo CD,
+# ingress and anything else you care about. Use a throwaway cluster.
+#
+#   kubectl apply -k examples/kustomize/node-tier
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: fawlty-tower
+resources:
+  - ../base
+  - diskfill.yaml
+  - pidbomb.yaml
+  - squatter.yaml
+patches:
+  # hostNetwork and hostPath are forbidden under "restricted" (and "baseline"),
+  # so the node tier has to lower the namespace's Pod Security level. That is
+  # deliberate and visible here, not something the default tier ever needs.
+  - target: {kind: Namespace, name: fawlty-tower}
+    patch: |-
+      - op: replace
+        path: /metadata/labels/pod-security.kubernetes.io~1enforce
+        value: privileged
+      - op: replace
+        path: /metadata/labels/pod-security.kubernetes.io~1warn
+        value: privileged
+# The base's image rewrite only applies to the base's own resources; the
+# node-tier Deployments need it repeated here.
+images:
+  - name: fawlty-tower
+    newName: ghcr.io/your-org/fawlty-tower   # <- where you pushed the image
+    newTag: latest

@@ -1,0 +1,43 @@
+# The Chef: flips the `chef-mood` label on this Deployment; Argo CD selfHeal flips
+# it back. The label MUST be declared here in Git, or Argo CD has nothing to
+# compare against and never reports drift.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chef
+  labels:
+    app.kubernetes.io/name: chef
+    app.kubernetes.io/part-of: fawlty-tower
+    chef-mood: calm
+spec:
+  replicas: 0  # checked in/out live by the `fawlty` CLI; tell Argo CD to ignore it
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chef
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chef
+        app.kubernetes.io/part-of: fawlty-tower
+    spec:
+      serviceAccountName: chef
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: guest
+          image: fawlty-tower
+          env:
+            - {name: FAWLTY_GUEST, value: "chef"}
+            - {name: FAWLTY_SELF_DEPLOYMENT, value: "chef"}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

@@ -1,0 +1,11 @@
+# The guests' own namespace. The default tier runs fine under Pod Security
+# "restricted"; the node-tier overlay deliberately lowers this to "privileged"
+# because hostNetwork and hostPath need it -- one more explicit gate.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fawlty-tower
+  labels:
+    app.kubernetes.io/part-of: fawlty-tower
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted

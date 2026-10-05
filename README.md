@@ -51,7 +51,9 @@ Three things keep this safe to run against a real cluster:
 This repo holds the source, the image, and the `fawlty` control CLI. The
 Kubernetes manifests (one Deployment per guest, plus the RBAC the API-touching
 guests need) live in your own GitOps or config repo — Fawlty Tower is
-deliberately infrastructure-agnostic and ships no cluster-specific config.
+deliberately infrastructure-agnostic. [`examples/`](examples/) has reference
+manifests to copy from: much of the ground truth depends on them (limits,
+probes, RBAC), so start there rather than from scratch.
 
 ## Using it
 
@@ -84,7 +86,22 @@ root-owned hostPath) must say so in their Deployment with
 
 ### Deploying
 
-Add one Deployment per guest to your config repo, each at `replicas: 0`, each
+Start from the reference manifests and copy them into your config repo:
+
+| Path | What |
+|---|---|
+| `examples/kustomize/base` | namespace (PSA `restricted`), the 10 default-tier guests at `replicas: 0`, Services, least-privilege RBAC, a ResourceQuota |
+| `examples/kustomize/node-tier` | base + diskfill, pidbomb, squatter; lowers the namespace to PSA `privileged` (deliberately) |
+| `examples/kustomize/reaper` | a CronJob running `python -m fawlty.reaper` every minute, so `check-in --for` TTLs are enforced in-cluster |
+| `examples/argocd/application.yaml` | Argo CD Application with `ignoreDifferences` on `/spec/replicas` |
+
+The manifests encode decisions the scenarios depend on. For example, Manuel
+and the Waiter get readiness probes but **no liveness probe**, because a
+liveness probe would turn their fault into a crash loop. The Kitchen gets more
+workers than CPU cores in its limit, and the Chef declares the label he fights
+over.
+
+If you write your own: one Deployment per guest, each at `replicas: 0`, each
 setting `FAWLTY_GUEST` to the guest's name. Give O'Reilly and the Chef a
 ServiceAccount whose RBAC is scoped to the `fawlty-tower` namespace only. If you
 run Argo CD (or similar), tell it to **ignore `.spec.replicas`** for this app, so
