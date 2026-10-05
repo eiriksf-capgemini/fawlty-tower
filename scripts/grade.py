@@ -11,10 +11,57 @@ the diagnosis to an LLM judge; this tool is the cheap first gate for CI.
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 SCENARIOS = Path(__file__).resolve().parent.parent / "scenarios" / "scenarios.json"
+
+# A phrase must start on a word boundary, so "healthy" does not match inside
+# "unhealthy" and "oom" does not match inside "headroom". The END is left open
+# on purpose so stems such as "throttl" or "reconcil" keep working.
+_LEFT_EDGE = r"(?<![a-z0-9])"
+
+# A hit preceded (within the same clause) by one of these is treated as
+# negated: "the pod is not OOMKilled" must not count as an OOM diagnosis.
+_NEGATORS = {"not", "no", "never", "without", "nothing", "none", "neither", "nor",
+             "isn't", "wasn't", "aren't", "weren't", "doesn't", "didn't", "don't",
+             "hasn't", "haven't", "hadn't", "can't", "cannot", "won't", "shouldn't",
+             "ruled", "excluding"}
+_NEGATION_WINDOW = 5  # words to look back, within the clause
+# Hard clause breaks: punctuation, and conjunctions that start a new claim
+# ("not OOMKilled but CrashLoopBackOff", "never released until OOMKilled").
+_CLAUSE_BREAK = re.compile(
+    r"[.;:!?()\n]|\b(?:but|however|although|though|whereas|yet|instead|rather|and|until|while|because|so)\b"
+)
+# Words that may sit between a comma and the phrase without ending the list:
+# "no restarts, CrashLoopBackOff or OOMKilled" negates all three.
+_LIST_GLUE = {"or", "nor", "any"}
+
+
+def _is_negated(text, start):
+    clause = _CLAUSE_BREAK.split(text[:start])[-1]
+    segments = clause.split(",")
+    scope = [segments.pop()]
+    # A comma ends the negation's reach unless what follows it (up to the
+    # phrase) is just a list continuation: nothing, or a few items joined by or/nor.
+    while segments:
+        words = re.findall(r"[a-z']+", scope[0])
+        if words and not (len(words) <= 3 and _LIST_GLUE & set(words)):
+            break
+        scope.insert(0, segments.pop())
+    words = re.findall(r"[a-z']+", " ".join(scope))[-_NEGATION_WINDOW:]
+    return any(w in _NEGATORS for w in words)
+
+
+def find(phrase, text):
+    """Return "hit", "negated" or None for `phrase` in lower-cased `text`."""
+    seen_negated = False
+    for m in re.finditer(_LEFT_EDGE + re.escape(phrase), text):
+        if not _is_negated(text, m.start()):
+            return "hit"
+        seen_negated = True
+    return "negated" if seen_negated else None
 
 
 def load():
@@ -23,18 +70,43 @@ def load():
 
 
 def grade(scenario, text):
-    low = text.lower()
+    low = text.lower().replace("\u2019", "'").replace("\u2018", "'")  # curly apostrophes
     groups = []
+    negated = []
     for group in scenario["required"]:
-        hit = next((p for p in group if p in low), None)
+        hit = None
+        for p in group:
+            state = find(p, low)
+            if state == "hit":
+                hit = p
+                break
+            if state == "negated":
+                negated.append(p)
         groups.append({"any_of": group, "matched": hit})
     matched = sum(1 for g in groups if g["matched"])
-    warnings = [m for m in scenario.get("misdiagnoses", []) if m in low]
+    warnings = []
+    for m in scenario.get("misdiagnoses", []):
+        state = find(m, low)
+        if state == "hit":
+            warnings.append(m)
+        elif state == "negated":
+            negated.append(m)
     return {
         "score": matched / len(groups),
         "groups": groups,
         "warnings": warnings,
+        "negated": negated,
+        "negative_control": bool(scenario.get("negative_control")),
     }
+
+
+def passed(result, threshold, strict=False):
+    """Misdiagnoses fail the run under --strict, and ALWAYS for a negative
+    control: inventing a problem on a healthy workload is the failure mode a
+    negative control exists to catch."""
+    fatal_warnings = (strict or result["negative_control"]) and result["warnings"]
+    # Round so the documented 0.67 means "2 of 3": 2/3 is 0.6666... and used to fail.
+    return round(result["score"], 2) >= threshold and not fatal_warnings
 
 
 def main(argv=None):
@@ -68,20 +140,23 @@ def main(argv=None):
 
     text = sys.stdin.read() if args.source == "-" else Path(args.source).read_text(encoding="utf-8")
     result = grade(sc, text)
-    passed = result["score"] >= args.threshold and not (args.strict and result["warnings"])
-    result.update(guest=args.guest, passed=passed, threshold=args.threshold)
+    ok = passed(result, args.threshold, args.strict)
+    result.update(guest=args.guest, passed=ok, threshold=args.threshold)
 
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print(f"{args.guest}: score {result['score']:.2f} (threshold {args.threshold}) -> {'PASS' if passed else 'FAIL'}")
+        print(f"{args.guest}: score {result['score']:.2f} (threshold {args.threshold}) -> {'PASS' if ok else 'FAIL'}")
         for g in result["groups"]:
             mark = "ok " if g["matched"] else "MISS"
             print(f"  [{mark}] {' | '.join(g['any_of'])}")
         for w in result["warnings"]:
-            print(f"  [warn] mentions common misdiagnosis: '{w}'")
+            fatal = args.strict or result["negative_control"]
+            print(f"  [{'FAIL' if fatal else 'warn'}] mentions common misdiagnosis: '{w}'")
+        for n in result["negated"]:
+            print(f"  [info] ignored negated mention: '{n}'")
         print(f"  expected root cause: {sc['root_cause']}")
-    return 0 if passed else 1
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

@@ -84,5 +84,7 @@ done
 "$ROOT/fawlty" help >/dev/null 2>&1; check "help works without kubectl context" 0 $?
 echo "diagnosis: pod is healthy, nothing wrong" | "$ROOT/fawlty" grade victim - >/dev/null 2>&1
 check "grade victim negative control passes" 0 $?
+echo "victim is unhealthy and failing" | "$ROOT/fawlty" grade victim - >/dev/null 2>&1
+check "grade victim negative control fails on an invented problem" 1 $?
 
 if [ "$fails" -eq 0 ]; then echo "all CLI tests passed"; else echo "$fails CLI test(s) failed"; exit 1; fi

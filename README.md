@@ -131,7 +131,12 @@ and `fawlty.io/expires-at` annotations on the Deployment.
 
 `scenarios/scenarios.json` is the ground truth: for every guest, the fault, the
 expected root cause, concept groups a correct diagnosis must cover, and common
-misdiagnoses. `victim` is a negative control: the right answer is "nothing is wrong".
+misdiagnoses. `victim` is a negative control: the right answer is "nothing is wrong",
+and any misdiagnosis fails it outright (no `--strict` needed).
+
+Phrases match on a word boundary (`healthy` does not match `unhealthy`), and a
+mention negated in the same clause (`not OOMKilled`) is ignored rather than
+counted, so an agent that explicitly rules something out is not penalised for it.
 
 ```
 fawlty explain sybil
