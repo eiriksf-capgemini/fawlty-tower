@@ -204,9 +204,11 @@ annotation key is still `fawlty.chef/...`.
 ## Tests
 
 ```
-python3 -m unittest discover -s tests   # scenario schema + grader
+python3 -m unittest discover -s tests   # grader, guest registry consistency, dispatch
 tests/test_cli.sh                       # CLI behaviour against a stub kubectl
 ```
+
+CI also runs shellcheck, ruff, hadolint, and builds the image to smoke-test it.
 
 ## The guests
 
@@ -268,8 +270,13 @@ each guest's module under `src/fawlty/guests/` for its knobs and defaults.
 
 1. Add `src/fawlty/guests/<name>.py` exposing `run()`.
 2. Register it in `GUESTS` in `src/fawlty/dispatch.py`.
-3. Add a Deployment (at `replicas: 0`) for it in your manifests.
-4. Add the name to the relevant tier list in the `fawlty` CLI.
+3. Add the name to the relevant tier list in the `fawlty` CLI.
+4. Add its ground truth to `scenarios/scenarios.json` (same tier).
+5. Add the name to `GUESTS` in `tests/test_grade.py`.
+6. Add a Deployment (at `replicas: 0`) for it in your manifests.
+
+`tests/test_registry.py` fails if steps 1–4 disagree, so a guest can't end up
+runnable but ungradable, or gradable but impossible to check in.
 
 ## License
 
