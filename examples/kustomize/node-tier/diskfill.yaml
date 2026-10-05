@@ -1,0 +1,41 @@
+# diskfill: writes FAWLTY_FILL_MB of incompressible ballast to a node hostPath,
+# toward DiskPressure. Root, because the hostPath directory is root-owned.
+# If the pod is killed rather than stopped, the file stays behind at
+# /var/lib/fawlty-fill/fawlty-ballast.bin (see README "Recovering").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: diskfill
+  labels: {app.kubernetes.io/name: diskfill, app.kubernetes.io/part-of: fawlty-tower, fawlty.io/tier: node}
+spec:
+  replicas: 0
+  selector:
+    matchLabels: {app.kubernetes.io/name: diskfill}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: diskfill, app.kubernetes.io/part-of: fawlty-tower}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30   # time to delete the ballast on scale-down
+      securityContext:
+        runAsUser: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: guest
+          image: fawlty-tower
+          env:
+            - {name: FAWLTY_GUEST, value: diskfill}
+            - {name: FAWLTY_FILL_DIR, value: /fill}
+            - {name: FAWLTY_FILL_MB, value: "2048"}   # size this against your node disk
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: fill, mountPath: /fill}
+      volumes:
+        - name: fill
+          hostPath: {path: /var/lib/fawlty-fill, type: DirectoryOrCreate}

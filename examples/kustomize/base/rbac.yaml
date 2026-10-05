@@ -1,0 +1,56 @@
+# Only O'Reilly and the Chef talk to the API, each with the least they need,
+# and only inside this namespace. Every other guest runs with no token at all.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: oreilly}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: oreilly}
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: oreilly}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: oreilly}
+subjects: [{kind: ServiceAccount, name: oreilly}]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: chef}
+automountServiceAccountToken: false
+---
+# The Chef may only read and patch HIS OWN Deployment.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: chef}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [chef]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: chef}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: chef}
+subjects: [{kind: ServiceAccount, name: chef}]
+---
+# A ceiling on O'Reilly's mess, so a bug can't flood the API server.
+apiVersion: v1
+kind: ResourceQuota
+metadata: {name: fawlty-tower}
+spec:
+  hard:
+    count/jobs.batch: "20"
+    pods: "40"

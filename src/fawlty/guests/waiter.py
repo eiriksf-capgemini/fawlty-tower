@@ -14,7 +14,7 @@ import os
 import random
 import threading
 
-from fawlty import common
+from fawlty import blind, common
 
 PORT = int(os.environ.get("FAWLTY_PORT", "8080"))
 MIN_DELAY_S = float(os.environ.get("FAWLTY_MIN_DELAY_S", "3.0"))
@@ -28,7 +28,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         delay = random.uniform(MIN_DELAY_S, MAX_DELAY_S)
         common.get_logger().warning(f"a table! just a moment... (sleeping {delay:.1f}s on {self.path})")
         _stop.wait(delay)
-        body = f"so sorry for the wait ({delay:.1f}s)\n".encode()
+        body = blind.text(f"so sorry for the wait ({delay:.1f}s)\n", "ok\n").encode()
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")

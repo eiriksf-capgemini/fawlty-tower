@@ -1,0 +1,31 @@
+# Services for the HTTP guests. Manuel's endpoint churn and the Waiter's latency
+# are only visible to Service-level tooling if there is a Service to watch.
+apiVersion: v1
+kind: Service
+metadata:
+  name: manuel
+  labels: {app.kubernetes.io/name: manuel, app.kubernetes.io/part-of: fawlty-tower}
+spec:
+  selector: {app.kubernetes.io/name: manuel}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: waiter
+  labels: {app.kubernetes.io/name: waiter, app.kubernetes.io/part-of: fawlty-tower}
+spec:
+  selector: {app.kubernetes.io/name: waiter}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victim
+  labels: {app.kubernetes.io/name: victim, app.kubernetes.io/part-of: fawlty-tower}
+spec:
+  selector: {app.kubernetes.io/name: victim}
+  ports:
+    - {name: http, port: 80, targetPort: http}

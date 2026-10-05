@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: fawlty-reaper}
+automountServiceAccountToken: false
+---
+# list + patch Deployments in this namespace only. The reaper itself only
+# touches Deployments labelled app.kubernetes.io/part-of=fawlty-tower.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: fawlty-reaper}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [list, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: fawlty-reaper}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: fawlty-reaper}
+subjects: [{kind: ServiceAccount, name: fawlty-reaper}]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fawlty-reaper
+  labels: {app.kubernetes.io/name: fawlty-reaper, app.kubernetes.io/part-of: fawlty-tower-control}
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 300
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: fawlty-reaper
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: reaper
+              image: fawlty-tower
+              command: [python, -m, fawlty.reaper]
+              env:
+                - {name: FAWLTY_GUEST, value: reaper}
+              resources:
+                requests: {cpu: 10m, memory: 32Mi}
+                limits: {cpu: 100m, memory: 96Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: [ALL]}

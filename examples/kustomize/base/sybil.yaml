@@ -1,0 +1,42 @@
+# Sybil: memory leak -> OOMKilled. The memory LIMIT is what makes this an OOMKill
+# (and keeps it off the node); FAWLTY_MAX_MB is her own backstop and must stay
+# ABOVE the limit or she never gets OOMKilled.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sybil
+  labels:
+    app.kubernetes.io/name: sybil
+    app.kubernetes.io/part-of: fawlty-tower
+spec:
+  replicas: 0  # checked in/out live by the `fawlty` CLI; tell Argo CD to ignore it
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sybil
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sybil
+        app.kubernetes.io/part-of: fawlty-tower
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: guest
+          image: fawlty-tower
+          env:
+            - {name: FAWLTY_GUEST, value: "sybil"}
+            - {name: FAWLTY_LEAK_INTERVAL_S, value: "2"}
+            - {name: FAWLTY_MAX_MB, value: "512"}
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

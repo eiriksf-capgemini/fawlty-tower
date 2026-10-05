@@ -1,0 +1,26 @@
+# Reference manifests for the default tier. Copy into your own config repo and
+# adapt; Fawlty Tower itself stays infrastructure-agnostic.
+#
+#   kubectl apply -k examples/kustomize/base         # everything at replicas: 0
+#   fawlty check-in basil                            # then check guests in
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: fawlty-tower
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - services.yaml
+  - basil.yaml
+  - sybil.yaml
+  - manuel.yaml
+  - kitchen.yaml
+  - waiter.yaml
+  - major.yaml
+  - polly.yaml
+  - oreilly.yaml
+  - chef.yaml
+  - victim.yaml
+images:
+  - name: fawlty-tower
+    newName: ghcr.io/your-org/fawlty-tower   # <- where you pushed the image
+    newTag: latest

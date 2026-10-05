@@ -6,6 +6,12 @@ cluster, this pushes the node toward DiskPressure, which the kubelet answers by
 evicting pods — including, potentially, critical workloads. That is why this is
 gated off by default and documented as "may strand the stack".
 
+The ballast is fresh random bytes for every chunk, not zeros and not one
+random chunk repeated: on filesystems with transparent compression or
+deduplication (btrfs, ZFS, some CSI drivers) zeros compress to nothing and a
+repeated chunk dedups to a single copy, so neither would ever move the node
+toward DiskPressure.
+
 Bounded by FAWLTY_FILL_MB so a check-in doesn't run the host disk to zero. The
 ballast file is truncated on start (opened "wb", not "ab"), so a crash/restart
 cycle refills from zero rather than stacking a fresh FILL_MB onto a leftover
@@ -27,7 +33,6 @@ def run() -> None:
     stop = common.stop_event()
     os.makedirs(FILL_DIR, exist_ok=True)
     target = os.path.join(FILL_DIR, "fawlty-ballast.bin")
-    chunk = b"\0" * (CHUNK_MB * 1024 * 1024)
     written = 0
 
     log.warning(f"diskfill engaged: writing up to {FILL_MB}MiB into {target}")
@@ -36,7 +41,8 @@ def run() -> None:
     with open(target, "wb", buffering=0) as fh:
         while not stop.is_set() and written < FILL_MB:
             try:
-                fh.write(chunk)
+                # New bytes each time: incompressible AND undedupable (module docstring).
+                fh.write(os.urandom(CHUNK_MB * 1024 * 1024))
                 os.fsync(fh.fileno())
                 written += CHUNK_MB
                 log.warning(f"ballast now {written}MiB / {FILL_MB}MiB")

@@ -13,7 +13,7 @@ import os
 import threading
 import time
 
-from fawlty import common
+from fawlty import blind, common
 
 PORT = int(os.environ.get("FAWLTY_PORT", "8080"))
 # Seconds healthy, then seconds unhealthy, repeating.
@@ -32,9 +32,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib signature
         healthy = _is_healthy()
         if self.path == "/healthz":
-            code, msg = (200, "sí, all good\n") if healthy else (503, "I know nothing!\n")
+            code, msg = (200, blind.text("sí, all good\n", "ok\n")) if healthy else (
+                503, blind.text("I know nothing!\n", "dependency status unknown\n"))
         else:
-            code, msg = (200, "Manuel at your service\n") if healthy else (503, "Qué?\n")
+            code, msg = (200, blind.text("Manuel at your service\n", "ok\n")) if healthy else (
+                503, blind.text("Qué?\n", "service unavailable\n"))
         body = msg.encode()
         self.send_response(code)
         self.send_header("Content-Type", "text/plain; charset=utf-8")

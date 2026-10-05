@@ -1,0 +1,40 @@
+# The Kitchen: CPU pinned at its limit -> CFS throttling. Workers must exceed the
+# limit in cores (workers >= ceil(limit) + 1), so 3 workers against 1.5 CPU.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kitchen
+  labels:
+    app.kubernetes.io/name: kitchen
+    app.kubernetes.io/part-of: fawlty-tower
+spec:
+  replicas: 0  # checked in/out live by the `fawlty` CLI; tell Argo CD to ignore it
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kitchen
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kitchen
+        app.kubernetes.io/part-of: fawlty-tower
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: guest
+          image: fawlty-tower
+          env:
+            - {name: FAWLTY_GUEST, value: "kitchen"}
+            - {name: FAWLTY_CPU_WORKERS, value: "3"}
+          resources:
+            requests: {cpu: 100m, memory: 32Mi}
+            limits: {cpu: 1500m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

@@ -51,7 +51,9 @@ Three things keep this safe to run against a real cluster:
 This repo holds the source, the image, and the `fawlty` control CLI. The
 Kubernetes manifests (one Deployment per guest, plus the RBAC the API-touching
 guests need) live in your own GitOps or config repo — Fawlty Tower is
-deliberately infrastructure-agnostic and ships no cluster-specific config.
+deliberately infrastructure-agnostic. [`examples/`](examples/) has reference
+manifests to copy from: much of the ground truth depends on them (limits,
+probes, RBAC), so start there rather than from scratch.
 
 ## Using it
 
@@ -76,13 +78,40 @@ FAWLTY_GUEST=major docker run --rm fawlty-tower:test
 Push the image to wherever your cluster pulls from. Every guest runs from this
 one image and differs only by its `FAWLTY_GUEST` env var.
 
+The image runs as uid `10001`, not root. Default-tier guests need nothing more
+and work with `runAsNonRoot: true` and `readOnlyRootFilesystem: true`. The
+node-tier guests that need root (squatter on host port 80, diskfill on a
+root-owned hostPath) must say so in their Deployment with
+`securityContext: {runAsUser: 0}`.
+
 ### Deploying
 
-Add one Deployment per guest to your config repo, each at `replicas: 0`, each
+Start from the reference manifests and copy them into your config repo:
+
+| Path | What |
+|---|---|
+| `examples/kustomize/base` | namespace (PSA `restricted`), the 10 default-tier guests at `replicas: 0`, Services, least-privilege RBAC, a ResourceQuota |
+| `examples/kustomize/node-tier` | base + diskfill, pidbomb, squatter; lowers the namespace to PSA `privileged` (deliberately) |
+| `examples/kustomize/reaper` | a CronJob running `python -m fawlty.reaper` every minute, so `check-in --for` TTLs are enforced in-cluster |
+| `examples/argocd/application.yaml` | Argo CD Application with `ignoreDifferences` on `/spec/replicas` |
+
+The manifests encode decisions the scenarios depend on. For example, Manuel
+and the Waiter get readiness probes but **no liveness probe**, because a
+liveness probe would turn their fault into a crash loop. The Kitchen gets more
+workers than CPU cores in its limit, and the Chef declares the label he fights
+over.
+
+If you write your own: one Deployment per guest, each at `replicas: 0`, each
 setting `FAWLTY_GUEST` to the guest's name. Give O'Reilly and the Chef a
 ServiceAccount whose RBAC is scoped to the `fawlty-tower` namespace only. If you
 run Argo CD (or similar), tell it to **ignore `.spec.replicas`** for this app, so
 the `fawlty` CLI's live scale toggle is not reverted by selfHeal.
+
+For the Chef's drift to be visible, his Deployment must **declare** the label he
+flips (default `chef-mood: calm`, override with `FAWLTY_CHEF_LABEL`). Argo CD only
+diffs fields that exist in Git, so a label that is only ever set live is not
+drift. Restrict his Role to `get`/`patch` on `deployments` with
+`resourceNames: [chef]`.
 
 ### Checking guests in and out
 
@@ -114,11 +143,17 @@ fawlty panic
 Unset, `panic` just evicts the guests; it never touches anything you haven't
 explicitly listed.
 
+diskfill removes its ballast file when it is stopped gracefully. If it was
+killed instead (evicted, OOMKilled, node reboot), the file stays on the node at
+`<FAWLTY_FILL_DIR hostPath>/fawlty-ballast.bin`. Delete it by hand, or check
+diskfill in and straight back out: it truncates the file on start and removes
+it on a clean stop.
+
 ## Safety rails
 
 ```
-export FAWLTY_ALLOWED_CONTEXTS="kind-fawlty minikube"   # clusters fawlty may touch
-fawlty check-in basil --for 10m     # auto-expires; enforce with `fawlty reap` (cron / loop)
+export FAWLTY_ALLOWED_CONTEXTS="kind-fawlty minikube"   # clusters fawlty may touch (required)
+fawlty check-in basil --for 10m     # marks an expiry; only enforced when `fawlty reap` runs (cron / loop)
 fawlty check-in basil --for 10m --wait   # block, then check out (Ctrl-C checks out early)
 fawlty check-in --tier node --yes   # node tier needs --yes AND the allowlist
 export FAWLTY_LOG=/tmp/fawlty.log   # "<ts> check-in basil" lines, for time-to-detect
@@ -127,11 +162,23 @@ export FAWLTY_LOG=/tmp/fawlty.log   # "<ts> check-in basil" lines, for time-to-d
 Each check-in/out also stamps `fawlty.io/checked-in-at`, `fawlty.io/checked-out-at`
 and `fawlty.io/expires-at` annotations on the Deployment.
 
+Every command that changes the cluster refuses to run unless the current
+kubectl context is in `FAWLTY_ALLOWED_CONTEXTS`. For a throwaway local cluster
+you can opt out with `FAWLTY_ALLOW_ANY_CONTEXT=1` (default tier only; the node
+tier always needs the allowlist). The context is resolved once at start-up and
+passed as `--context` to every kubectl call, so switching contexts in another
+terminal during `--wait` cannot redirect the final check-out to another cluster.
+
 ## Grading your ops tooling
 
 `scenarios/scenarios.json` is the ground truth: for every guest, the fault, the
 expected root cause, concept groups a correct diagnosis must cover, and common
-misdiagnoses. `victim` is a negative control: the right answer is "nothing is wrong".
+misdiagnoses. `victim` is a negative control: the right answer is "nothing is wrong",
+and any misdiagnosis fails it outright (no `--strict` needed).
+
+Phrases match on a word boundary (`healthy` does not match `unhealthy`), and a
+mention negated in the same clause (`not OOMKilled`) is ignored rather than
+counted, so an agent that explicitly rules something out is not penalised for it.
 
 ```
 fawlty explain sybil
@@ -142,12 +189,46 @@ fawlty grade basil diagnosis.txt --strict --json
 The keyword grader is a deterministic first gate for CI. For reasoning quality, pass
 `fawlty explain <guest>` plus the agent's output to an LLM judge.
 
+### Blind runs
+
+By default every guest announces itself: Deployments are called `sybil` and
+`kitchen`, and the logs say things like "Sybil is now hoarding 128MiB" or
+"expect CPU throttling". That is fun for humans, but an LLM-driven ops agent
+that reads those lines is being tested on reading comprehension, not diagnosis.
+
+Blind mode keeps every fault identical and removes the answer:
+
+```sh
+# in the guest's Deployment
+env:
+  - {name: FAWLTY_GUEST, value: sybil}
+  - {name: FAWLTY_BLIND, value: "1"}
+  - {name: FAWLTY_ALIAS, value: svc-91bc}   # used for the log guest= field and created objects
+
+# name the Deployment svc-91bc too, then tell the CLI:
+export FAWLTY_ALIASES="sybil=svc-91bc kitchen=svc-3f0e"
+fawlty aliases                 # guest -> Deployment
+fawlty check-in sybil          # scales svc-91bc
+```
+
+With `FAWLTY_BLIND=1`, log lines are rewritten into neutral service-like text
+(`cache size 128MiB`), persona names are scrubbed from anything unmatched
+(including tracebacks), the HTTP guests return neutral bodies, and O'Reilly's
+Events/Jobs use the alias and plausible reasons. The Chef's label and
+annotation keys are live object state that no log filter can hide, so in blind
+mode he defaults to flipping `release-channel` (declare `release-channel: stable`
+in Git, or set `FAWLTY_CHEF_LABEL` to something equally bland) and stamps a
+`reconciler/...` annotation. Known gap: diskfill's ballast file on the node is
+still called `fawlty-ballast.bin`.
+
 ## Tests
 
 ```
-python3 -m unittest discover -s tests   # scenario schema + grader
+python3 -m unittest discover -s tests   # grader, guest registry consistency, dispatch
 tests/test_cli.sh                       # CLI behaviour against a stub kubectl
 ```
+
+CI also runs shellcheck, ruff, hadolint, and builds the image to smoke-test it.
 
 ## The guests
 
@@ -166,13 +247,21 @@ and never threatens the node.
 | **The Major** | wanders off | constant (safe, allowlisted) outbound requests |
 | **Polly** | screeches | high-volume benign ERROR/WARN log storm |
 | **O'Reilly** | makes a mess | Kubernetes Event spam + short-lived Job flood |
-| **The Chef** | never does as told | patches his own Deployment, fighting Argo CD selfHeal |
+| **The Chef** | never does as told | flips a Git-declared label on his Deployment, fighting Argo CD selfHeal (OutOfSync flapping) |
 | **the victim** | perfectly innocent | a stable HTTP target to break |
+
+Basil exits with ordinary application codes (1, 2, 17, 42). 137 and 139 are
+left out on purpose because they look like an OOMKill and a segfault; set
+`FAWLTY_EXIT_CODES` (e.g. `1,137`) if you want that ambiguity.
 
 The Major only ever issues GETs against a fixed allowlist of harmless public
 sites (`src/fawlty/common.py`); it is never pointed at an arbitrary host.
 O'Reilly and the Chef touch the Kubernetes API through a ServiceAccount whose
 RBAC should be scoped to the `fawlty-tower` namespace only.
+O'Reilly's Jobs pass Pod Security Admission at `restricted`; set
+`FAWLTY_JOB_IMAGE` to a mirror if your cluster can't pull `busybox:1.36` from
+Docker Hub, and pass `POD_NAME`/`POD_UID` via the downward API so his Events
+point at his real pod.
 
 ### Node tier (gated, off by default)
 
@@ -191,15 +280,23 @@ deployed unless you add them, and still `replicas: 0` after that.
 Most guests read a few environment variables so you can dial the fault up or
 down without rebuilding — for example `FAWLTY_FILL_MB` (diskfill's disk budget),
 `FAWLTY_PID_MAX` (pidbomb's thread cap), `FAWLTY_HEALTHY_S` / `FAWLTY_UNHEALTHY_S`
-(Manuel's flap cycle), and `FAWLTY_CPU_WORKERS` (the Kitchen's busy threads). See
+(Manuel's flap cycle), `FAWLTY_CPU_WORKERS` (the Kitchen's busy workers),
+`FAWLTY_LEAK_CHUNK_MB` / `FAWLTY_LEAK_INTERVAL_S` / `FAWLTY_MAX_MB` (Sybil's leak
+rate and self-cap; keep the cap above her memory limit) and `FAWLTY_LOG_RATE`
+(Polly's lines per second, 1–1000). See
 each guest's module under `src/fawlty/guests/` for its knobs and defaults.
 
 ## Adding a guest
 
 1. Add `src/fawlty/guests/<name>.py` exposing `run()`.
 2. Register it in `GUESTS` in `src/fawlty/dispatch.py`.
-3. Add a Deployment (at `replicas: 0`) for it in your manifests.
-4. Add the name to the relevant tier list in the `fawlty` CLI.
+3. Add the name to the relevant tier list in the `fawlty` CLI.
+4. Add its ground truth to `scenarios/scenarios.json` (same tier).
+5. Add the name to `GUESTS` in `tests/test_grade.py`.
+6. Add a Deployment (at `replicas: 0`) for it in your manifests.
+
+`tests/test_registry.py` fails if steps 1–4 disagree, so a guest can't end up
+runnable but ungradable, or gradable but impossible to check in.
 
 ## License
 

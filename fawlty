@@ -10,12 +10,16 @@
 #
 # Environment:
 #   FAWLTY_ALLOWED_CONTEXTS  space-separated kubectl contexts this tool may act
-#                            on. REQUIRED for node-tier guests; strongly advised.
+#                            on. REQUIRED for any command that changes the cluster.
+#   FAWLTY_ALLOW_ANY_CONTEXT=1  opt out of the allowlist for default-tier guests
+#                            (prints a warning). Never relaxes the node tier.
 #   FAWLTY_REAL_NS           namespaces bounced by `panic` (space-separated).
 #   FAWLTY_ASSUME_YES=1      same as --yes.
 #   FAWLTY_LOG=<file>        append "<iso-ts> <action> <guest>" lines, so you can
 #                            compute time-to-detect against your alerting.
 #   FAWLTY_NS                namespace holding the guests (default fawlty-tower).
+#   FAWLTY_ALIASES           "guest=deployment ..." pairs, for blind runs where the
+#                            Deployments have neutral names (e.g. "sybil=svc-91bc").
 set -euo pipefail
 
 NS=${FAWLTY_NS:-fawlty-tower}
@@ -23,8 +27,15 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # Namespaces of YOUR real workloads, bounced by `panic` to recover after a test.
 # Empty by default so fawlty needs no knowledge of your cluster.
-# shellcheck disable=SC2206
-REAL_NS=(${FAWLTY_REAL_NS:-})
+# (read -a splits on whitespace without glob-expanding, unlike an unquoted array.)
+REAL_NS=()
+read -r -a REAL_NS <<<"${FAWLTY_REAL_NS:-}" || true
+
+# The kubectl context every call is pinned to. Resolved ONCE in main(), so a
+# context switch in another terminal (e.g. during `check-in --wait`) can never
+# redirect a later call -- including the check-out in the EXIT trap -- to a
+# different cluster than the one the allowlist approved.
+CTX=""
 
 DEFAULT_GUESTS=(basil sybil manuel kitchen waiter major polly oreilly chef victim)
 NODE_GUESTS=(diskfill pidbomb squatter)
@@ -32,6 +43,9 @@ ALL_GUESTS=("${DEFAULT_GUESTS[@]}" "${NODE_GUESTS[@]}")
 
 die() { echo "fawlty: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# kubectl, pinned to the context resolved at start-up.
+kc() { kubectl --context "$CTX" "$@"; }
 
 usage() {
   cat <<'USAGE'
@@ -46,9 +60,13 @@ fawlty -- check chaos guests in and out.
   fawlty panic                          evict-all + bounce FAWLTY_REAL_NS workloads
   fawlty grade <guest> <file|->         score a diagnosis against scenarios/
   fawlty explain <guest>                show the expected diagnosis for a guest
+  fawlty aliases                        show guest -> Deployment names (FAWLTY_ALIASES)
 
 Flags: --tier T, --for DURATION (90s|10m|2h), --wait (block, then check out), --yes
-Node-tier guests need --yes AND FAWLTY_ALLOWED_CONTEXTS set.
+Commands that change the cluster need FAWLTY_ALLOWED_CONTEXTS to include the
+current context (or FAWLTY_ALLOW_ANY_CONTEXT=1 for the default tier only).
+Node-tier guests always need --yes AND FAWLTY_ALLOWED_CONTEXTS.
+--for is enforced only when `fawlty reap` runs (cron/loop) or with --wait.
 USAGE
 }
 
@@ -66,6 +84,34 @@ is_node_guest() {
 
 tier_of() { if is_node_guest "$1"; then echo node; else echo default; fi; }
 
+# Blind runs give Deployments neutral names so the agent under test can't read
+# the answer off `kubectl get deploy`. FAWLTY_ALIASES maps guest -> Deployment;
+# guests without an alias use their own name. (No associative arrays: macOS
+# still ships bash 3.2.)
+deploy_of() {
+  local g="$1" pair
+  for pair in ${FAWLTY_ALIASES:-}; do
+    [ "${pair%%=*}" = "$g" ] && { echo "${pair#*=}"; return 0; }
+  done
+  echo "$g"
+}
+
+guest_of() {
+  local d="$1" pair
+  for pair in ${FAWLTY_ALIASES:-}; do
+    [ "${pair#*=}" = "$d" ] && { echo "${pair%%=*}"; return 0; }
+  done
+  echo "$d"
+}
+
+validate_aliases() {
+  local pair
+  for pair in ${FAWLTY_ALIASES:-}; do
+    [[ "$pair" == ?*=?* ]] || die "bad FAWLTY_ALIASES entry '$pair' (want guest=deployment)"
+    is_guest "${pair%%=*}" || die "FAWLTY_ALIASES: unknown guest '${pair%%=*}'"
+  done
+}
+
 tier_guests() {
   case "$1" in
     default) printf '%s\n' "${DEFAULT_GUESTS[@]}" ;;
@@ -78,7 +124,7 @@ tier_guests() {
 to_seconds() {
   local d="$1" n unit
   [[ "$d" =~ ^([0-9]+)([smh]?)$ ]] || die "bad duration '$d' (use e.g. 90s, 10m, 2h)"
-  n=${BASH_REMATCH[1]}
+  n=$((10#${BASH_REMATCH[1]}))  # 10#: "09s" is nine seconds, not a bad octal
   unit=${BASH_REMATCH[2]:-s}
   case "${unit:-s}" in
     s) echo "$n" ;;
@@ -87,18 +133,25 @@ to_seconds() {
   esac
 }
 
+resolve_context() {
+  CTX=$(kubectl config current-context 2>/dev/null) || CTX=""
+  [ -n "$CTX" ] || die "no current kubectl context"
+}
+
 # Refuse to act on a cluster that isn't explicitly allowed.
-# $1 = "strict" makes an unset allowlist fatal (used for node tier).
+# $1 = "strict" (node tier): the allowlist is mandatory, no opt-out.
 guard_context() {
-  local mode="${1:-}" ctx c ok=0
-  ctx=$(kubectl config current-context 2>/dev/null) || die "no current kubectl context"
+  local mode="${1:-}" c ok=0
+  [ -n "$CTX" ] || resolve_context
   if [ -n "${FAWLTY_ALLOWED_CONTEXTS:-}" ]; then
-    for c in $FAWLTY_ALLOWED_CONTEXTS; do [ "$c" = "$ctx" ] && ok=1; done
-    [ "$ok" -eq 1 ] || die "context '$ctx' is not in FAWLTY_ALLOWED_CONTEXTS ($FAWLTY_ALLOWED_CONTEXTS)"
+    for c in $FAWLTY_ALLOWED_CONTEXTS; do [ "$c" = "$CTX" ] && ok=1; done
+    [ "$ok" -eq 1 ] || die "context '$CTX' is not in FAWLTY_ALLOWED_CONTEXTS ($FAWLTY_ALLOWED_CONTEXTS)"
   elif [ "$mode" = strict ]; then
-    die "node-tier guests need FAWLTY_ALLOWED_CONTEXTS set (current context: '$ctx')"
+    die "node-tier guests need FAWLTY_ALLOWED_CONTEXTS set (current context: '$CTX')"
+  elif [ "${FAWLTY_ALLOW_ANY_CONTEXT:-0}" = 1 ]; then
+    echo "fawlty: warning: FAWLTY_ALLOWED_CONTEXTS not set (FAWLTY_ALLOW_ANY_CONTEXT=1); acting on context '$CTX'" >&2
   else
-    echo "fawlty: warning: FAWLTY_ALLOWED_CONTEXTS not set; acting on context '$ctx'" >&2
+    die "set FAWLTY_ALLOWED_CONTEXTS to the contexts fawlty may change (current: '$CTX'), or FAWLTY_ALLOW_ANY_CONTEXT=1 to opt out for the default tier"
   fi
 }
 
@@ -109,28 +162,44 @@ log_event() {
 
 # scale <guest> <n> [ttl_seconds]   returns 0 ok, 2 not deployed
 scale() {
-  local guest="$1" n="$2" ttl="${3:-}" now
-  if ! kubectl -n "$NS" get deploy "$guest" >/dev/null 2>&1; then
-    echo "  $guest: NOT DEPLOYED (add its Deployment to your manifests; node-tier is gated off by default)" >&2
+  local guest="$1" n="$2" ttl="${3:-}" now dep label
+  dep=$(deploy_of "$guest")
+  label="$guest"; [ "$dep" = "$guest" ] || label="$guest ($dep)"
+  if ! kc -n "$NS" get deploy "$dep" >/dev/null 2>&1; then
+    echo "  $label: NOT DEPLOYED (add its Deployment to your manifests; node-tier is gated off by default)" >&2
     return 2
   fi
-  kubectl -n "$NS" scale deploy "$guest" --replicas="$n" >/dev/null
+  # Callers run scale under `|| rc=$?`, which disables set -e in here, so every
+  # step that matters must fail explicitly.
+  kc -n "$NS" scale deploy "$dep" --replicas="$n" >/dev/null || {
+    echo "  $label: scale to $n FAILED" >&2; return 1; }
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if [ "$n" -gt 0 ]; then
+    # The guest is running from here on, so the audit log must say so even
+    # if a later step fails.
+    log_event check-in "$guest"
     if [ -n "$ttl" ]; then
-      kubectl -n "$NS" annotate deploy "$guest" --overwrite \
-        "fawlty.io/checked-in-at=$now" "fawlty.io/expires-at=$(( $(date +%s) + ttl ))" >/dev/null
+      kc -n "$NS" annotate deploy "$dep" --overwrite \
+        "fawlty.io/checked-in-at=$now" "fawlty.io/expires-at=$(( $(date +%s) + ttl ))" >/dev/null || {
+        # A running guest with no TTL is exactly what --for exists to prevent:
+        # undo the check-in rather than leave it for someone to find.
+        if kc -n "$NS" scale deploy "$dep" --replicas=0 >/dev/null; then
+          log_event check-out "$guest"
+          echo "  $label: setting its TTL FAILED; checked out again" >&2
+        else
+          echo "  $label: setting its TTL FAILED and so did checking it out again; it is RUNNING WITHOUT A TTL, check it out by hand" >&2
+        fi
+        return 1; }
     else
-      kubectl -n "$NS" annotate deploy "$guest" --overwrite \
+      kc -n "$NS" annotate deploy "$dep" --overwrite \
         "fawlty.io/checked-in-at=$now" "fawlty.io/expires-at-" >/dev/null 2>&1 || true
     fi
-    log_event check-in "$guest"
   else
-    kubectl -n "$NS" annotate deploy "$guest" --overwrite \
+    kc -n "$NS" annotate deploy "$dep" --overwrite \
       "fawlty.io/checked-out-at=$now" "fawlty.io/expires-at-" >/dev/null 2>&1 || true
     log_event check-out "$guest"
   fi
-  echo "  $guest -> replicas=$n${ttl:+ (expires in ${ttl}s)}"
+  echo "  $label -> replicas=$n${ttl:+ (expires in ${ttl}s)}"
 }
 
 DEPLOY_COLUMNS='NAME:.metadata.name,REPLICAS:.spec.replicas,READY:.status.readyReplicas,EXPIRES:.metadata.annotations.fawlty\.io/expires-at'
@@ -138,12 +207,12 @@ DEPLOY_COLUMNS='NAME:.metadata.name,REPLICAS:.spec.replicas,READY:.status.readyR
 cmd_roster() {
   local rows g tier row want ready exp now remaining
   # One API call instead of three per guest.
-  rows=$(kubectl -n "$NS" get deploy -o custom-columns="$DEPLOY_COLUMNS" --no-headers 2>/dev/null || true)
+  rows=$(kc -n "$NS" get deploy -o custom-columns="$DEPLOY_COLUMNS" --no-headers 2>/dev/null || true)
   now=$(date +%s)
   printf '%-10s %-8s %-9s %-6s %s\n' GUEST TIER REPLICAS READY TTL
   for g in "${ALL_GUESTS[@]}"; do
     tier=$(tier_of "$g")
-    row=$(printf '%s\n' "$rows" | awk -v g="$g" '$1==g {print $2, $3, $4}')
+    row=$(printf '%s\n' "$rows" | awk -v d="$(deploy_of "$g")" '$1==d {print $2, $3, $4}')
     if [ -z "$row" ]; then
       printf '%-10s %-8s %-9s %-6s %s\n' "$g" "$tier" "-" "-" "(not deployed)"
       continue
@@ -153,7 +222,11 @@ cmd_roster() {
     [ "$ready" = "<none>" ] && ready=0
     remaining="-"
     if [[ "$exp" =~ ^[0-9]+$ ]]; then
-      remaining="$(( exp - now ))s"
+      if [ "$exp" -le "$now" ]; then
+        remaining="expired (run: fawlty reap)"
+      else
+        remaining="$(( exp - now ))s"
+      fi
     fi
     printf '%-10s %-8s %-9s %-6s %s\n' "$g" "$tier" "$want" "$ready" "$remaining"
   done
@@ -176,6 +249,7 @@ parse_targets() {
   done
   if [ -n "$TIER" ]; then
     local g
+    tier_guests "$TIER" >/dev/null  # validate here: a die() inside <(...) would only exit the subshell
     while read -r g; do TARGETS+=("$g"); done < <(tier_guests "$TIER")
   fi
   [ "${#TARGETS[@]}" -gt 0 ] || die "need a guest name or --tier <default|node|all>"
@@ -183,7 +257,7 @@ parse_targets() {
 
 cmd_check() {
   local action="$1"; shift
-  local n=0 ttl="" g rc failed=0 has_node=0
+  local n=0 ttl="" g rc failed=0 has_node=0 deployed=()
   [ "$action" = check-in ] && n=1
   parse_targets "$@"
   [ -z "$FOR" ] || ttl=$(to_seconds "$FOR")
@@ -205,14 +279,33 @@ cmd_check() {
   echo "$action:"
   for g in "${TARGETS[@]}"; do
     rc=0; scale "$g" "$n" "$ttl" || rc=$?
-    [ "$rc" -eq 0 ] || failed=1
+    [ "$rc" -eq 2 ] || deployed+=("$g")
+    # Checking out a guest that was never deployed is a no-op, not a failure.
+    [ "$rc" -eq 0 ] || { [ "$n" -eq 0 ] && [ "$rc" -eq 2 ]; } || failed=1
   done
 
-  if [ "$WAIT" -eq 1 ] && [ "$failed" -eq 0 ]; then
-    echo "waiting ${FOR} (Ctrl-C checks the guests out early)..."
+  if [ -n "$ttl" ] && [ "$WAIT" -eq 0 ] && [ "$n" -eq 1 ]; then
+    echo "note: --for is only enforced when 'fawlty reap' runs (cron/loop or an in-cluster reaper); use --wait to block and check out yourself" >&2
+  fi
+
+  if [ "$WAIT" -eq 1 ]; then
+    # Whatever happens from here, every Deployment we touched gets checked out
+    # on exit. Checking out a guest whose check-in failed is a harmless no-op.
     # shellcheck disable=SC2064
-    trap "echo; echo 'checking out:'; for x in ${TARGETS[*]}; do scale \"\$x\" 0 || true; done" EXIT
-    sleep "$ttl"
+    trap "kill \"\${SLEEP_PID:-}\" 2>/dev/null || true; echo; echo 'checking out:'; for x in ${deployed[*]}; do scale \"\$x\" 0 || true; done" EXIT
+    if [ "$failed" -ne 0 ]; then
+      echo "fawlty: a check-in failed; checking the others out instead of waiting" >&2
+      return 1
+    fi
+    echo "waiting ${FOR} (Ctrl-C checks the guests out early)..."
+    # Route INT/TERM through the EXIT trap, and sleep in the background: bash
+    # defers trapped signals until a foreground command ends, so a plain
+    # `sleep 7200` would ignore `kill` for two hours.
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    sleep "$ttl" &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID"
   fi
   return "$failed"
 }
@@ -232,12 +325,13 @@ cmd_evict_all() {
 cmd_reap() {
   local rows now name exp
   guard_context
-  rows=$(kubectl -n "$NS" get deploy -o custom-columns="$DEPLOY_COLUMNS" --no-headers 2>/dev/null || true)
+  rows=$(kc -n "$NS" get deploy -o custom-columns="$DEPLOY_COLUMNS" --no-headers 2>/dev/null || true)
   now=$(date +%s)
   echo "reaping expired guests:"
   while read -r name _ _ exp; do
     [ -n "$name" ] || continue
     [[ "$exp" =~ ^[0-9]+$ ]] || continue
+    name=$(guest_of "$name")
     if [ "$exp" -le "$now" ] && is_guest "$name"; then
       scale "$name" 0 || true
     fi
@@ -253,14 +347,14 @@ cmd_panic() {
   fi
   echo "bouncing the real workloads to recover:"
   for ns in "${REAL_NS[@]}"; do
-    if ! kubectl get ns "$ns" >/dev/null 2>&1; then
+    if ! kc get ns "$ns" >/dev/null 2>&1; then
       echo "  $ns: namespace not found, skipped" >&2
       continue
     fi
     for kind in deployment statefulset daemonset; do
       # No name restarts every resource of that kind in the namespace; `rollout
       # restart` has no --all flag, and an empty kind exits 0 ("No resources found").
-      if out=$(kubectl -n "$ns" rollout restart "$kind" 2>&1); then
+      if out=$(kc -n "$ns" rollout restart "$kind" 2>&1); then
         echo "  $ns: restarted ${kind}s"
       else
         echo "  $ns: $kind restart FAILED: $out" >&2
@@ -276,6 +370,12 @@ cmd_grade() {
   python3 "$SCRIPT_DIR/scripts/grade.py" "$@"
 }
 
+cmd_aliases() {
+  local g
+  printf '%-10s %s\n' GUEST DEPLOYMENT
+  for g in "${ALL_GUESTS[@]}"; do printf '%-10s %s\n' "$g" "$(deploy_of "$g")"; done
+}
+
 cmd_explain() {
   [ "$#" -eq 1 ] || die "usage: fawlty explain <guest>"
   cmd_grade --show "$1"
@@ -283,12 +383,15 @@ cmd_explain() {
 
 main() {
   local cmd="${1:-roster}"; shift || true
+  case "$cmd" in -h|--help|help) usage; return 0 ;; esac
+  validate_aliases
   case "$cmd" in
-    -h|--help|help) usage; return 0 ;;
+    aliases) cmd_aliases; return 0 ;;
     grade) cmd_grade "$@"; return ;;
     explain) cmd_explain "$@"; return ;;
   esac
   have kubectl || die "kubectl not found on PATH"
+  resolve_context
   case "$cmd" in
     roster|ls|status) cmd_roster ;;
     check-in|in)      cmd_check check-in "$@" ;;

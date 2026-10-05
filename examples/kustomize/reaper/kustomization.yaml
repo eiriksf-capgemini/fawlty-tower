@@ -1,0 +1,13 @@
+# Optional: enforce `fawlty check-in --for <ttl>` inside the cluster.
+# Without this, a TTL is only honoured when someone runs `fawlty reap`.
+#
+#   kubectl apply -k examples/kustomize/reaper
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: fawlty-tower
+resources:
+  - reaper.yaml
+images:
+  - name: fawlty-tower
+    newName: ghcr.io/your-org/fawlty-tower   # same image as the guests
+    newTag: latest

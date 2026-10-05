@@ -8,11 +8,13 @@ errors from noise.
 from __future__ import annotations
 
 import itertools
+import os
 import random
 
 from fawlty import common
 
-LINES_PER_SECOND = 50
+# Clamped to 1..1000 so a typo can't turn Polly into a logging-backend DoS.
+LINES_PER_SECOND = min(max(int(os.environ.get("FAWLTY_LOG_RATE", "50")), 1), 1000)
 
 SCARY_BUT_FINE = [
     "connection reset by peer (retrying, attempt %d)",

@@ -1,0 +1,26 @@
+# Argo CD Application for the reference manifests. Two things matter:
+#
+# 1. ignoreDifferences on /spec/replicas + RespectIgnoreDifferences, so the
+#    `fawlty` CLI's live check-in/out (a scale) is not reverted by selfHeal.
+# 2. selfHeal stays ON: the Chef's whole act is fighting it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fawlty-tower
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/your-org/your-config-repo.git
+    targetRevision: main
+    path: fawlty-tower            # a copy of examples/kustomize/base
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fawlty-tower
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers: [/spec/replicas]
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [RespectIgnoreDifferences=true]
