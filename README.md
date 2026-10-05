@@ -120,6 +120,12 @@ fawlty panic
 Unset, `panic` just evicts the guests; it never touches anything you haven't
 explicitly listed.
 
+diskfill removes its ballast file when it is stopped gracefully. If it was
+killed instead (evicted, OOMKilled, node reboot), the file stays on the node at
+`<FAWLTY_FILL_DIR hostPath>/fawlty-ballast.bin`. Delete it by hand, or check
+diskfill in and straight back out: it truncates the file on start and removes
+it on a clean stop.
+
 ## Safety rails
 
 ```

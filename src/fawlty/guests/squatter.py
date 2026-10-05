@@ -4,11 +4,17 @@ With hostNetwork, binds a port on the node (default 80) and holds it, so it
 contends with whatever else wants that port — on this stack, the ingress-nginx
 controller. Expect ingress disruption while the squatter is checked in. Gated
 off by default; the node-tier Deployment sets hostNetwork and the port.
+
+If the port is already taken, the squatter exits non-zero instead of sitting
+there Running and doing nothing. A silent idle pod would make the scenario's
+ground truth ("host port conflict") false; a crash-looping pod whose logs say
+"Address already in use" is the real, diagnosable symptom of a port conflict.
 """
 from __future__ import annotations
 
 import os
 import socket
+import sys
 
 from fawlty import common
 
@@ -27,8 +33,8 @@ def run() -> None:
         log.warning(f"squatting host port {PORT}; ingress on this port will contend with us")
     except OSError as exc:
         log.error(f"could not bind port {PORT} (something already holds it): {exc}")
-        stop.wait()
-        return
+        sock.close()
+        sys.exit(1)
 
     sock.settimeout(1.0)
     while not stop.is_set():
