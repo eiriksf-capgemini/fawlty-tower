@@ -67,9 +67,9 @@
     },
     "chef": {
       "tier": "default",
-      "fault": "Patches its own Deployment, fighting GitOps self-heal.",
+      "fault": "Patches a Git-declared label on its own Deployment, fighting GitOps self-heal.",
       "root_cause": "In-cluster actor modifying its Deployment and a GitOps controller reverting it (drift/reconcile fight).",
-      "required": [["deployment"], ["patch", "modif", "scale", "replicas", "mutat"], ["argo", "selfheal", "self-heal", "gitops", "drift", "reconcil", "fight"]],
+      "required": [["deployment"], ["patch", "modif", "mutat", "label", "out-of-band", "overwrit"], ["argo", "selfheal", "self-heal", "gitops", "drift", "reconcil", "fight", "outofsync", "out of sync"]],
       "misdiagnoses": ["crashloopbackoff"],
       "expected_remediation": "Find the writer via audit/managedFields; restrict RBAC or ignoreDifferences."
     },

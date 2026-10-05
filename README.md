@@ -84,6 +84,12 @@ ServiceAccount whose RBAC is scoped to the `fawlty-tower` namespace only. If you
 run Argo CD (or similar), tell it to **ignore `.spec.replicas`** for this app, so
 the `fawlty` CLI's live scale toggle is not reverted by selfHeal.
 
+For the Chef's drift to be visible, his Deployment must **declare** the label he
+flips (default `chef-mood: calm`, override with `FAWLTY_CHEF_LABEL`). Argo CD only
+diffs fields that exist in Git, so a label that is only ever set live is not
+drift. Restrict his Role to `get`/`patch` on `deployments` with
+`resourceNames: [chef]`.
+
 ### Checking guests in and out
 
 The `fawlty` CLI is the control surface. It scales a guest's Deployment to 1 to
@@ -171,7 +177,7 @@ and never threatens the node.
 | **The Major** | wanders off | constant (safe, allowlisted) outbound requests |
 | **Polly** | screeches | high-volume benign ERROR/WARN log storm |
 | **O'Reilly** | makes a mess | Kubernetes Event spam + short-lived Job flood |
-| **The Chef** | never does as told | patches his own Deployment, fighting Argo CD selfHeal |
+| **The Chef** | never does as told | flips a Git-declared label on his Deployment, fighting Argo CD selfHeal (OutOfSync flapping) |
 | **the victim** | perfectly innocent | a stable HTTP target to break |
 
 Basil exits with ordinary application codes (1, 2, 17, 42). 137 and 139 are
