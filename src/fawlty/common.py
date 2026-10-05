@@ -27,7 +27,7 @@ from fawlty import blind
 SAFE_SITES: tuple[str, ...] = (
     "https://example.com",
     "https://www.example.org",
-    "https://neverssl.com",
+    "http://neverssl.com",  # plain HTTP by design: neverssl does not serve HTTPS
     "https://httpbingo.org/get",
     "https://www.wikipedia.org",
     "https://www.cloudflare.com",
