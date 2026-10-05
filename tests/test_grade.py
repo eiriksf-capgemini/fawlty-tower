@@ -91,6 +91,10 @@ class GradeTests(unittest.TestCase):
                 "It isn\u2019t failing and looks healthy.",
                 "It hasn't had an outage. Stable.",
                 "Healthy: no restarts, CrashLoopBackOff or OOMKilled.",
+                "Healthy: no restarts, CrashLoopBackOff, or OOMKilled.",
+                "Healthy: no restarts, evictions, CrashLoopBackOff, or OOMKilled.",
+                "We excluded an outage; the service is healthy.",
+                "I can rule out an outage: healthy.",
                 "Nothing to report, the service is healthy.",
                 "The workload is healthy and stable, nothing wrong.",
             ],
@@ -107,6 +111,24 @@ class GradeTests(unittest.TestCase):
             for text in texts:
                 r = grade.grade(self.sc[guest], text)
                 self.assertTrue(grade.passed(r, 0.67), f"{guest}: {text!r} -> {r}")
+
+    def test_negation_reaches_every_item_of_a_list(self):
+        for text in ("no restarts, crashloopbackoff, or oomkilled",
+                     "no restarts, evictions, crashloopbackoff, or oomkilled",
+                     "the cluster is fine, no restarts, crashloopbackoff, or oomkilled"):
+            self.assertEqual(grade.find("oomkilled", text), "negated", text)
+
+    def test_a_new_claim_after_a_comma_is_not_negated(self):
+        for text in ("not oomkilled, it's crashloopbackoff",
+                     "not oomkilled, the pod is in crashloopbackoff"):
+            self.assertEqual(grade.find("crashloopbackoff", text), "hit", text)
+
+    def test_excluded_and_rule_out_negate(self):
+        for text in ("we excluded oomkilled as a possible cause",
+                     "this excludes oomkilled",
+                     "we can rule out oomkilled",
+                     "having ruled out oomkilled"):
+            self.assertEqual(grade.find("oomkilled", text), "negated", text)
 
     def test_wrong_victim_diagnoses_fail(self):
         for text in ("The victim is unhealthy.", "Service is failing and in CrashLoopBackOff.",

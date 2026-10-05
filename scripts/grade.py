@@ -27,7 +27,7 @@ _LEFT_EDGE = r"(?<![a-z0-9])"
 _NEGATORS = {"not", "no", "never", "without", "nothing", "none", "neither", "nor",
              "isn't", "wasn't", "aren't", "weren't", "doesn't", "didn't", "don't",
              "hasn't", "haven't", "hadn't", "can't", "cannot", "won't", "shouldn't",
-             "ruled", "excluding"}
+             "rule", "rules", "ruled", "exclude", "excludes", "excluded", "excluding"}
 _NEGATION_WINDOW = 5  # words to look back, within the clause
 # Hard clause breaks: punctuation, and conjunctions that start a new claim
 # ("not OOMKilled but CrashLoopBackOff", "never released until OOMKilled").
@@ -37,20 +37,27 @@ _CLAUSE_BREAK = re.compile(
 # Words that may sit between a comma and the phrase without ending the list:
 # "no restarts, CrashLoopBackOff or OOMKilled" negates all three.
 _LIST_GLUE = {"or", "nor", "any"}
+_LIST_ITEM_WORDS = 3  # longest comma-separated item still read as a list entry
+_WORD = re.compile(r"[a-z']+")
 
 
 def _is_negated(text, start):
     clause = _CLAUSE_BREAK.split(text[:start])[-1]
     segments = clause.split(",")
     scope = [segments.pop()]
-    # A comma ends the negation's reach unless what follows it (up to the
-    # phrase) is just a list continuation: nothing, or a few items joined by or/nor.
-    while segments:
-        words = re.findall(r"[a-z']+", scope[0])
-        if words and not (len(words) <= 3 and _LIST_GLUE & set(words)):
-            break
+    # A comma ends the negation's reach unless the phrase is the tail of a
+    # list: what sits between the last comma and the phrase is nothing or a
+    # short or/nor joiner ("no restarts, CrashLoopBackOff, or OOMKilled").
+    # Once in a list, earlier short items keep it going; a longer segment is
+    # a new claim ("not OOMKilled, the pod is in CrashLoopBackOff") and ends it.
+    words = _WORD.findall(scope[0])
+    in_list = not words or (len(words) <= _LIST_ITEM_WORDS and bool(_LIST_GLUE & set(words)))
+    while in_list and segments:
         scope.insert(0, segments.pop())
-    words = re.findall(r"[a-z']+", " ".join(scope))[-_NEGATION_WINDOW:]
+        in_list = len(_WORD.findall(scope[0])) <= _LIST_ITEM_WORDS
+    # The look-back window is measured from the start of the list, so a long
+    # list cannot push the negator out of reach; list items do not count.
+    words = _WORD.findall(scope[0])[-_NEGATION_WINDOW:] + _WORD.findall(" ".join(scope[1:]))
     return any(w in _NEGATORS for w in words)
 
 

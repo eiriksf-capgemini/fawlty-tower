@@ -175,15 +175,25 @@ scale() {
     echo "  $label: scale to $n FAILED" >&2; return 1; }
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if [ "$n" -gt 0 ]; then
+    # The guest is running from here on, so the audit log must say so even
+    # if a later step fails.
+    log_event check-in "$guest"
     if [ -n "$ttl" ]; then
       kc -n "$NS" annotate deploy "$dep" --overwrite \
         "fawlty.io/checked-in-at=$now" "fawlty.io/expires-at=$(( $(date +%s) + ttl ))" >/dev/null || {
-        echo "  $label: checked in, but setting its TTL FAILED; check it out by hand" >&2; return 1; }
+        # A running guest with no TTL is exactly what --for exists to prevent:
+        # undo the check-in rather than leave it for someone to find.
+        if kc -n "$NS" scale deploy "$dep" --replicas=0 >/dev/null; then
+          log_event check-out "$guest"
+          echo "  $label: setting its TTL FAILED; checked out again" >&2
+        else
+          echo "  $label: setting its TTL FAILED and so did checking it out again; it is RUNNING WITHOUT A TTL, check it out by hand" >&2
+        fi
+        return 1; }
     else
       kc -n "$NS" annotate deploy "$dep" --overwrite \
         "fawlty.io/checked-in-at=$now" "fawlty.io/expires-at-" >/dev/null 2>&1 || true
     fi
-    log_event check-in "$guest"
   else
     kc -n "$NS" annotate deploy "$dep" --overwrite \
       "fawlty.io/checked-out-at=$now" "fawlty.io/expires-at-" >/dev/null 2>&1 || true
@@ -247,7 +257,7 @@ parse_targets() {
 
 cmd_check() {
   local action="$1"; shift
-  local n=0 ttl="" g rc failed=0 has_node=0
+  local n=0 ttl="" g rc failed=0 has_node=0 deployed=()
   [ "$action" = check-in ] && n=1
   parse_targets "$@"
   [ -z "$FOR" ] || ttl=$(to_seconds "$FOR")
@@ -269,6 +279,7 @@ cmd_check() {
   echo "$action:"
   for g in "${TARGETS[@]}"; do
     rc=0; scale "$g" "$n" "$ttl" || rc=$?
+    [ "$rc" -eq 2 ] || deployed+=("$g")
     # Checking out a guest that was never deployed is a no-op, not a failure.
     [ "$rc" -eq 0 ] || { [ "$n" -eq 0 ] && [ "$rc" -eq 2 ]; } || failed=1
   done
@@ -277,10 +288,16 @@ cmd_check() {
     echo "note: --for is only enforced when 'fawlty reap' runs (cron/loop or an in-cluster reaper); use --wait to block and check out yourself" >&2
   fi
 
-  if [ "$WAIT" -eq 1 ] && [ "$failed" -eq 0 ]; then
-    echo "waiting ${FOR} (Ctrl-C checks the guests out early)..."
+  if [ "$WAIT" -eq 1 ]; then
+    # Whatever happens from here, every Deployment we touched gets checked out
+    # on exit. Checking out a guest whose check-in failed is a harmless no-op.
     # shellcheck disable=SC2064
-    trap "kill \"\${SLEEP_PID:-}\" 2>/dev/null || true; echo; echo 'checking out:'; for x in ${TARGETS[*]}; do scale \"\$x\" 0 || true; done" EXIT
+    trap "kill \"\${SLEEP_PID:-}\" 2>/dev/null || true; echo; echo 'checking out:'; for x in ${deployed[*]}; do scale \"\$x\" 0 || true; done" EXIT
+    if [ "$failed" -ne 0 ]; then
+      echo "fawlty: a check-in failed; checking the others out instead of waiting" >&2
+      return 1
+    fi
+    echo "waiting ${FOR} (Ctrl-C checks the guests out early)..."
     # Route INT/TERM through the EXIT trap, and sleep in the background: bash
     # defers trapped signals until a foreground command ends, so a plain
     # `sleep 7200` would ignore `kill` for two hours.

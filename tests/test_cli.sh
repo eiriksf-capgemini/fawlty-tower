@@ -14,6 +14,7 @@ case "$*" in
     # Simulate someone switching context right after the first scale call.
     if [ -n "${FLIP_CTX_ON_SCALE:-}" ] && [ ! -s "$CTX_FILE" ]; then echo "$FLIP_CTX_ON_SCALE" > "$CTX_FILE"; fi
     if [ -n "${FAIL_SCALE:-}" ]; then echo "Error from server (Forbidden)" >&2; exit 1; fi ;;
+  *" annotate deploy ${FAIL_ANNOTATE:-//} "*) echo "Error from server (Forbidden)" >&2; exit 1 ;;
   *"get deploy -o custom-columns"*) printf 'basil 1 1 <none>\nsybil 0 <none> 1\n' ;;
   *"rollout restart"*--all*) echo "error: unknown flag: --all" >&2; exit 1 ;;
   *"get deploy "*|*"get ns "*) exit 0 ;;
@@ -73,6 +74,20 @@ reset; FAIL_SCALE=1 FAWLTY_ALLOWED_CONTEXTS=kind-test "$ROOT/fawlty" check-in ba
 check "a failed kubectl scale is reported as failure" 1 "$rc"
 reset; FAIL_SCALE=1 FAWLTY_ALLOWED_CONTEXTS=kind-test "$ROOT/fawlty" evict-all >/dev/null 2>&1; rc=$?
 check "  ...including by evict-all" 1 "$rc"
+
+# A guest whose TTL could not be set must not be left running untracked.
+reset; FAIL_ANNOTATE=basil FAWLTY_LOG="$TMP/ttl.log" FAWLTY_ALLOWED_CONTEXTS=kind-test "$ROOT/fawlty" check-in basil --for 10m >/dev/null 2>&1; rc=$?
+check "a failed TTL annotate is reported as failure" 1 "$rc"
+grep -q 'scale deploy basil --replicas=0' "$KUBECTL_LOG"; check "  ...and the guest is checked out again" 0 $?
+grep -q 'check-in basil' "$TMP/ttl.log"; check "  ...and the check-in is still logged" 0 $?
+grep -q 'check-out basil' "$TMP/ttl.log"; check "  ...as is the check-out" 0 $?
+
+# One failed check-in under --wait must not strand the guests that did start.
+reset; start=$SECONDS
+FAIL_ANNOTATE=sybil FAWLTY_ALLOWED_CONTEXTS=kind-test "$ROOT/fawlty" check-in basil sybil --for 1h --wait >/dev/null 2>&1; rc=$?
+check "--wait with one failed check-in fails" 1 "$rc"
+check "  ...without waiting out the TTL" 1 "$(( SECONDS - start < 5 ))"
+grep -q 'scale deploy basil --replicas=0' "$KUBECTL_LOG"; check "  ...and checks the started guest out" 0 $?
 
 reset; FAWLTY_ALLOWED_CONTEXTS=kind-test "$ROOT/fawlty" check-in basil --for 09s >/dev/null 2>&1; rc=$?
 check "durations with a leading zero are decimal" 0 "$rc"
