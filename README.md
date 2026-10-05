@@ -160,6 +160,35 @@ fawlty grade basil diagnosis.txt --strict --json
 The keyword grader is a deterministic first gate for CI. For reasoning quality, pass
 `fawlty explain <guest>` plus the agent's output to an LLM judge.
 
+### Blind runs
+
+By default every guest announces itself: Deployments are called `sybil` and
+`kitchen`, and the logs say things like "Sybil is now hoarding 128MiB" or
+"expect CPU throttling". That is fun for humans, but an LLM-driven ops agent
+that reads those lines is being tested on reading comprehension, not diagnosis.
+
+Blind mode keeps every fault identical and removes the answer:
+
+```sh
+# in the guest's Deployment
+env:
+  - {name: FAWLTY_GUEST, value: sybil}
+  - {name: FAWLTY_BLIND, value: "1"}
+  - {name: FAWLTY_ALIAS, value: svc-91bc}   # used for the log guest= field and created objects
+
+# name the Deployment svc-91bc too, then tell the CLI:
+export FAWLTY_ALIASES="sybil=svc-91bc kitchen=svc-3f0e"
+fawlty aliases                 # guest -> Deployment
+fawlty check-in sybil          # scales svc-91bc
+```
+
+With `FAWLTY_BLIND=1`, log lines are rewritten into neutral service-like text
+(`cache size 128MiB`), persona names are scrubbed from anything unmatched
+(including tracebacks), the HTTP guests return neutral bodies, and O'Reilly's
+Events/Jobs use the alias and plausible reasons. Known gaps: diskfill's ballast
+file on the node is still called `fawlty-ballast.bin`, and the Chef's
+annotation key is still `fawlty.chef/...`.
+
 ## Tests
 
 ```

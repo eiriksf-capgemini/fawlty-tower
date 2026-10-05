@@ -11,7 +11,7 @@ import http.server
 import os
 import threading
 
-from fawlty import common
+from fawlty import blind, common
 
 PORT = int(os.environ.get("FAWLTY_PORT", "8080"))
 
@@ -31,8 +31,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         else:
             self._send(
                 200,
-                "Fawlty Towers reception. The victim is in and feeling fine.\n"
-                "Check in a guest to ruin its day.\n",
+                blind.text(
+                    "Fawlty Towers reception. The victim is in and feeling fine.\n"
+                    "Check in a guest to ruin its day.\n",
+                    "ok\n",
+                ),
             )
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003 - stdlib hook

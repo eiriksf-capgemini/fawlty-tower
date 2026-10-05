@@ -18,6 +18,8 @@
 #   FAWLTY_LOG=<file>        append "<iso-ts> <action> <guest>" lines, so you can
 #                            compute time-to-detect against your alerting.
 #   FAWLTY_NS                namespace holding the guests (default fawlty-tower).
+#   FAWLTY_ALIASES           "guest=deployment ..." pairs, for blind runs where the
+#                            Deployments have neutral names (e.g. "sybil=svc-91bc").
 set -euo pipefail
 
 NS=${FAWLTY_NS:-fawlty-tower}
@@ -58,6 +60,7 @@ fawlty -- check chaos guests in and out.
   fawlty panic                          evict-all + bounce FAWLTY_REAL_NS workloads
   fawlty grade <guest> <file|->         score a diagnosis against scenarios/
   fawlty explain <guest>                show the expected diagnosis for a guest
+  fawlty aliases                        show guest -> Deployment names (FAWLTY_ALIASES)
 
 Flags: --tier T, --for DURATION (90s|10m|2h), --wait (block, then check out), --yes
 Commands that change the cluster need FAWLTY_ALLOWED_CONTEXTS to include the
@@ -80,6 +83,34 @@ is_node_guest() {
 }
 
 tier_of() { if is_node_guest "$1"; then echo node; else echo default; fi; }
+
+# Blind runs give Deployments neutral names so the agent under test can't read
+# the answer off `kubectl get deploy`. FAWLTY_ALIASES maps guest -> Deployment;
+# guests without an alias use their own name. (No associative arrays: macOS
+# still ships bash 3.2.)
+deploy_of() {
+  local g="$1" pair
+  for pair in ${FAWLTY_ALIASES:-}; do
+    [ "${pair%%=*}" = "$g" ] && { echo "${pair#*=}"; return 0; }
+  done
+  echo "$g"
+}
+
+guest_of() {
+  local d="$1" pair
+  for pair in ${FAWLTY_ALIASES:-}; do
+    [ "${pair#*=}" = "$d" ] && { echo "${pair%%=*}"; return 0; }
+  done
+  echo "$d"
+}
+
+validate_aliases() {
+  local pair
+  for pair in ${FAWLTY_ALIASES:-}; do
+    [[ "$pair" == ?*=?* ]] || die "bad FAWLTY_ALIASES entry '$pair' (want guest=deployment)"
+    is_guest "${pair%%=*}" || die "FAWLTY_ALIASES: unknown guest '${pair%%=*}'"
+  done
+}
 
 tier_guests() {
   case "$1" in
@@ -131,32 +162,34 @@ log_event() {
 
 # scale <guest> <n> [ttl_seconds]   returns 0 ok, 2 not deployed
 scale() {
-  local guest="$1" n="$2" ttl="${3:-}" now
-  if ! kc -n "$NS" get deploy "$guest" >/dev/null 2>&1; then
-    echo "  $guest: NOT DEPLOYED (add its Deployment to your manifests; node-tier is gated off by default)" >&2
+  local guest="$1" n="$2" ttl="${3:-}" now dep label
+  dep=$(deploy_of "$guest")
+  label="$guest"; [ "$dep" = "$guest" ] || label="$guest ($dep)"
+  if ! kc -n "$NS" get deploy "$dep" >/dev/null 2>&1; then
+    echo "  $label: NOT DEPLOYED (add its Deployment to your manifests; node-tier is gated off by default)" >&2
     return 2
   fi
   # Callers run scale under `|| rc=$?`, which disables set -e in here, so every
   # step that matters must fail explicitly.
-  kc -n "$NS" scale deploy "$guest" --replicas="$n" >/dev/null || {
-    echo "  $guest: scale to $n FAILED" >&2; return 1; }
+  kc -n "$NS" scale deploy "$dep" --replicas="$n" >/dev/null || {
+    echo "  $label: scale to $n FAILED" >&2; return 1; }
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if [ "$n" -gt 0 ]; then
     if [ -n "$ttl" ]; then
-      kc -n "$NS" annotate deploy "$guest" --overwrite \
+      kc -n "$NS" annotate deploy "$dep" --overwrite \
         "fawlty.io/checked-in-at=$now" "fawlty.io/expires-at=$(( $(date +%s) + ttl ))" >/dev/null || {
-        echo "  $guest: checked in, but setting its TTL FAILED; check it out by hand" >&2; return 1; }
+        echo "  $label: checked in, but setting its TTL FAILED; check it out by hand" >&2; return 1; }
     else
-      kc -n "$NS" annotate deploy "$guest" --overwrite \
+      kc -n "$NS" annotate deploy "$dep" --overwrite \
         "fawlty.io/checked-in-at=$now" "fawlty.io/expires-at-" >/dev/null 2>&1 || true
     fi
     log_event check-in "$guest"
   else
-    kc -n "$NS" annotate deploy "$guest" --overwrite \
+    kc -n "$NS" annotate deploy "$dep" --overwrite \
       "fawlty.io/checked-out-at=$now" "fawlty.io/expires-at-" >/dev/null 2>&1 || true
     log_event check-out "$guest"
   fi
-  echo "  $guest -> replicas=$n${ttl:+ (expires in ${ttl}s)}"
+  echo "  $label -> replicas=$n${ttl:+ (expires in ${ttl}s)}"
 }
 
 DEPLOY_COLUMNS='NAME:.metadata.name,REPLICAS:.spec.replicas,READY:.status.readyReplicas,EXPIRES:.metadata.annotations.fawlty\.io/expires-at'
@@ -169,7 +202,7 @@ cmd_roster() {
   printf '%-10s %-8s %-9s %-6s %s\n' GUEST TIER REPLICAS READY TTL
   for g in "${ALL_GUESTS[@]}"; do
     tier=$(tier_of "$g")
-    row=$(printf '%s\n' "$rows" | awk -v g="$g" '$1==g {print $2, $3, $4}')
+    row=$(printf '%s\n' "$rows" | awk -v d="$(deploy_of "$g")" '$1==d {print $2, $3, $4}')
     if [ -z "$row" ]; then
       printf '%-10s %-8s %-9s %-6s %s\n' "$g" "$tier" "-" "-" "(not deployed)"
       continue
@@ -281,6 +314,7 @@ cmd_reap() {
   while read -r name _ _ exp; do
     [ -n "$name" ] || continue
     [[ "$exp" =~ ^[0-9]+$ ]] || continue
+    name=$(guest_of "$name")
     if [ "$exp" -le "$now" ] && is_guest "$name"; then
       scale "$name" 0 || true
     fi
@@ -319,6 +353,12 @@ cmd_grade() {
   python3 "$SCRIPT_DIR/scripts/grade.py" "$@"
 }
 
+cmd_aliases() {
+  local g
+  printf '%-10s %s\n' GUEST DEPLOYMENT
+  for g in "${ALL_GUESTS[@]}"; do printf '%-10s %s\n' "$g" "$(deploy_of "$g")"; done
+}
+
 cmd_explain() {
   [ "$#" -eq 1 ] || die "usage: fawlty explain <guest>"
   cmd_grade --show "$1"
@@ -326,8 +366,10 @@ cmd_explain() {
 
 main() {
   local cmd="${1:-roster}"; shift || true
+  case "$cmd" in -h|--help|help) usage; return 0 ;; esac
+  validate_aliases
   case "$cmd" in
-    -h|--help|help) usage; return 0 ;;
+    aliases) cmd_aliases; return 0 ;;
     grade) cmd_grade "$@"; return ;;
     explain) cmd_explain "$@"; return ;;
   esac

@@ -131,6 +131,17 @@ for k in deployment statefulset daemonset; do
   grep -q "rollout restart $k" "$KUBECTL_LOG"; check "  ...restarts ${k}s" 0 $?
 done
 
+# Blind runs: Deployments carry neutral names, the CLI still speaks guest names.
+reset; FAWLTY_ALIASES="basil=svc-a7f3" FAWLTY_ALLOWED_CONTEXTS=kind-test "$ROOT/fawlty" check-in basil >/dev/null 2>&1; rc=$?
+check "aliased check-in succeeds" 0 "$rc"
+grep -q 'scale deploy svc-a7f3 --replicas=1' "$KUBECTL_LOG"; check "  ...and scales the aliased Deployment" 0 $?
+grep -q 'scale deploy basil ' "$KUBECTL_LOG"; check "  ...and never the persona name" 1 $?
+reset; out=$(FAWLTY_ALIASES="sybil=basil basil=nobody" "$ROOT/fawlty" roster 2>&1)
+grep -Eq 'sybil +default +1 +1' <<<"$out"; check "roster looks guests up by their alias" 0 $?
+"$ROOT/fawlty" aliases >/dev/null 2>&1; check "aliases works without a cluster" 0 $?
+FAWLTY_ALIASES="nobody=x" "$ROOT/fawlty" aliases >/dev/null 2>&1; check "alias for unknown guest rejected" 1 $?
+FAWLTY_ALIASES="basil" "$ROOT/fawlty" aliases >/dev/null 2>&1; check "malformed alias rejected" 1 $?
+
 "$ROOT/fawlty" help >/dev/null 2>&1; check "help works without kubectl context" 0 $?
 echo "diagnosis: pod is healthy, nothing wrong" | "$ROOT/fawlty" grade victim - >/dev/null 2>&1
 check "grade victim negative control passes" 0 $?

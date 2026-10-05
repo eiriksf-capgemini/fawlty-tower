@@ -15,12 +15,19 @@ import datetime as dt
 import random
 import uuid
 
-from fawlty import common
+from fawlty import blind, common
 
 EVENT_INTERVAL_S = 3.0
 JOB_INTERVAL_S = 15.0
 
 REASONS = ["BuildingSomething", "KnockedItDown", "WrongWall", "SatisfiedCustomer", "Oops"]
+# Blind mode: plausible controller-ish reasons that do not name the fault.
+NEUTRAL_REASONS = ["SyncStarted", "ConfigReloaded", "CacheRefreshed", "LeaseRenewed", "TaskScheduled"]
+
+
+def _me() -> str:
+    """Name used for created objects: the persona, or FAWLTY_ALIAS when blind."""
+    return blind.alias() if blind.enabled() else "oreilly"
 
 
 def run() -> None:
@@ -43,7 +50,7 @@ def run() -> None:
     tick = 0.0
 
     while not stop.is_set():
-        reason = random.choice(REASONS)
+        reason = random.choice(NEUTRAL_REASONS if blind.enabled() else REASONS)
         if core is not None:
             _emit_event(core, ns, reason, log)
         else:
@@ -61,17 +68,17 @@ def _emit_event(core, ns: str, reason: str, log) -> None:
     from kubernetes import client  # type: ignore
 
     now = dt.datetime.now(dt.timezone.utc)
-    name = f"oreilly-{uuid.uuid4().hex[:8]}"
+    name = f"{_me()}-{uuid.uuid4().hex[:8]}"
     body = client.CoreV1Event(
         metadata=client.V1ObjectMeta(name=name, namespace=ns),
         involved_object=client.V1ObjectReference(kind="Pod", namespace=ns, name="oreilly"),
         reason=reason,
-        message=f"O'Reilly did a thing: {reason}",
+        message=blind.text(f"O'Reilly did a thing: {reason}", f"{reason} completed"),
         type="Warning",
         event_time=now,
-        reporting_component="fawlty-tower/oreilly",
-        reporting_instance="oreilly",
-        action="Chaos",
+        reporting_component=blind.text("fawlty-tower/oreilly", f"{_me()}-controller"),
+        reporting_instance=_me(),
+        action=blind.text("Chaos", "Sync"),
         first_timestamp=now,
         last_timestamp=now,
         count=1,
@@ -86,14 +93,14 @@ def _emit_event(core, ns: str, reason: str, log) -> None:
 def _spawn_job(batch, ns: str, log) -> None:
     from kubernetes import client  # type: ignore
 
-    name = f"oreilly-job-{uuid.uuid4().hex[:8]}"
+    name = f"{_me()}-job-{uuid.uuid4().hex[:8]}"
     job = client.V1Job(
-        metadata=client.V1ObjectMeta(name=name, namespace=ns, labels={"app": "oreilly"}),
+        metadata=client.V1ObjectMeta(name=name, namespace=ns, labels={"app": _me()}),
         spec=client.V1JobSpec(
             backoff_limit=0,
             ttl_seconds_after_finished=30,
             template=client.V1PodTemplateSpec(
-                metadata=client.V1ObjectMeta(labels={"app": "oreilly"}),
+                metadata=client.V1ObjectMeta(labels={"app": _me()}),
                 spec=client.V1PodSpec(
                     restart_policy="Never",
                     containers=[

@@ -17,6 +17,8 @@ import socketserver
 import sys
 import threading
 
+from fawlty import blind
+
 # A hard allowlist of safe, well-known, read-only endpoints. The Major only
 # ever issues GETs against these. This is deliberately NOT configurable from
 # the environment: a chaos workload that can be pointed at an arbitrary host
@@ -46,11 +48,16 @@ def get_logger() -> logging.Logger:
     Format is deliberately ops-dashboard-shaped (level + logger + message) so
     the noise a guest makes looks like a real service misbehaving, not like
     print() debugging.
+
+    In blind mode (FAWLTY_BLIND=1) the logger is named after FAWLTY_ALIAS and
+    every record is rewritten into neutral text; see fawlty.blind.
     """
-    logger = logging.getLogger(guest_name())
+    logger = logging.getLogger(blind.alias() if blind.enabled() else guest_name())
     if logger.handlers:
         return logger
     handler = logging.StreamHandler(sys.stdout)
+    if blind.enabled():
+        handler.addFilter(blind.BlindFilter())
     handler.setFormatter(
         logging.Formatter(
             "%(asctime)s level=%(levelname)s guest=%(name)s pid=%(process)d msg=%(message)s"
@@ -105,3 +112,8 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """
 
     daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        # socketserver's default prints the traceback straight to stderr,
+        # bypassing the logger (and blind mode's filter). Log it instead.
+        get_logger().exception(f"error while handling a request from {client_address[0]}")
