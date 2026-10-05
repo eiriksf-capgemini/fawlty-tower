@@ -10,6 +10,13 @@ Processes, not threads: CPython's GIL lets only one thread execute bytecode at
 a time, so N busy threads still burn roughly one core. With a CPU limit above
 1 core the thread version never reached its limit and produced no throttling.
 Set FAWLTY_CPU_WORKERS to at least ceil(cpu limit) + 1 to guarantee saturation.
+
+The workers are tied to the parent's life, not just to its graceful shutdown:
+a SIGKILL to the parent (grace period expired, `--grace-period=0`, or a bare
+`python -m fawlty.dispatch` outside a container's PID namespace) must not
+leave N busy-loops running with nobody to reap them. On Linux the kernel
+delivers SIGKILL to each worker when the parent dies (PR_SET_PDEATHSIG);
+everywhere else the worker notices it has been re-parented and exits.
 """
 from __future__ import annotations
 
@@ -20,15 +27,29 @@ import signal
 from fawlty import common
 
 WORKERS = int(os.environ.get("FAWLTY_CPU_WORKERS", "4"))
+_PR_SET_PDEATHSIG = 1  # linux/prctl.h
 
 
-def _burn() -> None:
+def _die_with_parent() -> None:
+    """Best effort: ask the kernel to SIGKILL this process when its parent exits."""
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(_PR_SET_PDEATHSIG, int(signal.SIGKILL), 0, 0, 0)
+    except (OSError, AttributeError):
+        pass  # not Linux; the getppid() check below covers it
+
+
+def _burn(parent: int) -> None:
     # Children must die on terminate() (SIGTERM) and stay quiet on Ctrl-C; the
     # parent owns shutdown. Reset whatever handlers were inherited on fork.
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _die_with_parent()
     x = 0.0001
-    while True:
+    # Re-parented means the parent is gone (it also closes the window between
+    # the parent dying and prctl() above being armed).
+    while os.getppid() == parent:
         # A tight loop of real arithmetic so the work can't be optimised away.
         for _ in range(100_000):
             x = (x * 1.0000001 + 1.0) % 1_000_000.0
@@ -41,7 +62,8 @@ def run() -> None:
     stop = common.stop_event()
     log.warning(f"the Kitchen is slammed: burning CPU on {WORKERS} workers")
 
-    procs = [mp.Process(target=_burn, name=f"kitchen-burn-{i}", daemon=True) for i in range(WORKERS)]
+    me = os.getpid()
+    procs = [mp.Process(target=_burn, args=(me,), name=f"kitchen-burn-{i}", daemon=True) for i in range(WORKERS)]
     for p in procs:
         p.start()
 

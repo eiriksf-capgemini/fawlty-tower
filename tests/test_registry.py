@@ -1,9 +1,11 @@
-"""The guest list lives in four places; keep them in lock-step.
+"""The guest list lives in several places; keep them in lock-step.
 
 dispatch.GUESTS (what the image can run), the `fawlty` CLI's tier arrays
-(what you can check in), scenarios.json (what can be graded) and the guest
-modules themselves. Adding a guest to one and forgetting another used to
-fail silently: an ungradable guest, or one the CLI refuses to check in.
+(what you can check in), scenarios.json (what can be graded), the guest
+modules themselves, blind.py's persona scrubber and test_blind's leak oracle.
+Adding a guest to one and forgetting another used to fail silently: an
+ungradable guest, one the CLI refuses to check in, or a persona name that
+walks straight through blind mode.
 """
 import importlib
 import json
@@ -14,7 +16,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-from fawlty import dispatch  # noqa: E402
+from fawlty import blind, dispatch  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling test modules
+from test_blind import LEAKS  # noqa: E402
 
 
 def _cli_array(name):
@@ -43,6 +47,11 @@ class RegistryTests(unittest.TestCase):
             self.assertEqual(self.scenarios[g]["tier"], "default", g)
         for g in self.node:
             self.assertEqual(self.scenarios[g]["tier"], "node", g)
+
+    def test_blind_scrubber_and_leak_oracle_know_every_guest(self):
+        for g in dispatch.GUESTS:
+            self.assertEqual(blind.scrub(f"hello {g} here"), "hello service here", g)
+            self.assertIsNotNone(LEAKS.search(g), f"test_blind.LEAKS does not match {g!r}")
 
     def test_every_guest_module_exposes_run(self):
         for name, path in dispatch.GUESTS.items():

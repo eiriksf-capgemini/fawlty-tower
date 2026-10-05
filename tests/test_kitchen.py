@@ -36,6 +36,27 @@ class KitchenTests(unittest.TestCase):
         cores = (usage.ru_utime + usage.ru_stime) / wall
         self.assertGreater(cores, 1.3, f"kitchen only used {cores:.2f} cores with 2 workers")
 
+    def test_workers_do_not_outlive_a_sigkilled_parent(self):
+        """No PID namespace here, exactly like hostPID or --grace-period=0: a hard
+        kill of the parent must not leave busy-loops behind for init to inherit."""
+        env = dict(os.environ, FAWLTY_GUEST="kitchen", FAWLTY_CPU_WORKERS="2", PYTHONPATH=str(SRC))
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "fawlty.dispatch"], env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        time.sleep(2.0)  # let the workers start
+        proc.send_signal(signal.SIGKILL)
+        proc.wait(timeout=5)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(proc.pid, 0)  # workers inherited the parent's process group
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        os.killpg(proc.pid, signal.SIGKILL)
+        self.fail("kitchen workers survived SIGKILL of their parent")
+
 
 if __name__ == "__main__":
     unittest.main()

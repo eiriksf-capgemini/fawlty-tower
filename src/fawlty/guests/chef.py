@@ -18,16 +18,22 @@ only the replicas field from selfHeal so the fawlty CLI's scale toggle survives.
 
 RBAC: get + patch on deployments, ideally restricted with
 `resourceNames: [<this deployment>]` so the Chef can only fight with himself.
+
+Blind mode: the label key, its values and the annotation key are all live
+cluster state that `kubectl get deploy -o yaml` shows verbatim, and the log
+filter cannot touch them. Under FAWLTY_BLIND=1 they default to neutral names
+(declare `release-channel: stable` in Git instead of `chef-mood: calm`).
 """
 from __future__ import annotations
 
 import os
 
-from fawlty import common
+from fawlty import blind, common
 
 DEPLOYMENT = os.environ.get("FAWLTY_SELF_DEPLOYMENT", "chef")
-LABEL = os.environ.get("FAWLTY_CHEF_LABEL", "chef-mood")
-MOODS = ("sulking", "furious")  # n=1 -> furious, as before
+LABEL = os.environ.get("FAWLTY_CHEF_LABEL", blind.text("chef-mood", "release-channel"))
+MOODS = blind.text(("sulking", "furious"), ("canary", "rollback"))  # n=1 -> furious, as before
+MARKER = blind.text("fawlty.chef/rearranged-at", "reconciler/last-applied-generation")
 INTERVAL_S = float(os.environ.get("FAWLTY_CHEF_INTERVAL_S", "20.0"))
 
 
@@ -50,7 +56,7 @@ def _patch_body(n: int) -> dict:
     mood = MOODS[n % len(MOODS)]
     return {
         "metadata": {
-            "annotations": {"fawlty.chef/rearranged-at": str(n)},
+            "annotations": {MARKER: str(n)},
             "labels": {LABEL: mood},
         }
     }

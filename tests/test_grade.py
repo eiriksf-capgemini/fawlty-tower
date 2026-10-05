@@ -141,6 +141,12 @@ class GradeTests(unittest.TestCase):
         self.assertAlmostEqual(r["score"], 2 / 3)
         self.assertTrue(grade.passed(r, 0.67))
 
+    def test_fatal_warning_rule_is_shared(self):
+        r = grade.grade(self.sc["sybil"], "OOMKilled, memory at limit, restart loop. Node memory pressure?")
+        self.assertFalse(grade.warnings_are_fatal(r))
+        self.assertTrue(grade.warnings_are_fatal(r, strict=True))
+        self.assertTrue(grade.warnings_are_fatal(grade.grade(self.sc["victim"], "it had an outage")))
+
     def test_cli_exit_codes(self):
         self.assertEqual(grade.main(["--list"]), 0)
         self.assertEqual(grade.main(["nobody", "-"]), 2)

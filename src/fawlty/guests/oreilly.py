@@ -42,7 +42,7 @@ NEUTRAL_REASONS = ["SyncStarted", "ConfigReloaded", "CacheRefreshed", "LeaseRene
 
 def _me() -> str:
     """Name used for created objects: the persona, or FAWLTY_ALIAS when blind."""
-    return blind.alias() if blind.enabled() else "oreilly"
+    return blind.text("oreilly", blind.alias())
 
 
 def run() -> None:

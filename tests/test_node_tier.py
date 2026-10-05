@@ -32,21 +32,24 @@ class NodeTierTests(unittest.TestCase):
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("could not bind port", out.stdout)
 
-    def test_diskfill_ballast_is_incompressible_and_cleaned_up(self):
+    def test_diskfill_ballast_is_incompressible_undedupable_and_cleaned_up(self):
         with tempfile.TemporaryDirectory() as tmp:
             proc = subprocess.Popen(
                 [sys.executable, "-m", "fawlty.dispatch"],
-                env=_env(FAWLTY_GUEST="diskfill", FAWLTY_FILL_DIR=tmp, FAWLTY_FILL_MB="16"),
+                env=_env(FAWLTY_GUEST="diskfill", FAWLTY_FILL_DIR=tmp, FAWLTY_FILL_MB="32"),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             ballast = Path(tmp) / "fawlty-ballast.bin"
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline and not (ballast.exists() and ballast.stat().st_size >= 16 << 20):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not (ballast.exists() and ballast.stat().st_size >= 32 << 20):
                 time.sleep(0.1)
-            head = ballast.read_bytes()[: 1 << 20]
+            data = ballast.read_bytes()
             proc.send_signal(signal.SIGTERM)
             proc.wait(timeout=10)
+            head = data[: 1 << 20]
             self.assertGreater(len(set(head)), 200, "ballast looks compressible (mostly one byte value)")
+            # Two 16MiB chunks; a repeated chunk would dedup to one on btrfs/ZFS.
+            self.assertNotEqual(data[: 16 << 20], data[16 << 20: 32 << 20], "ballast repeats the same chunk")
             self.assertFalse(ballast.exists(), "ballast not removed on graceful stop")
 
 

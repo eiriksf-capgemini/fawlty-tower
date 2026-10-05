@@ -107,11 +107,15 @@ def grade(scenario, text):
     }
 
 
-def passed(result, threshold, strict=False):
+def warnings_are_fatal(result, strict=False):
     """Misdiagnoses fail the run under --strict, and ALWAYS for a negative
     control: inventing a problem on a healthy workload is the failure mode a
     negative control exists to catch."""
-    fatal_warnings = (strict or result["negative_control"]) and result["warnings"]
+    return bool(strict or result["negative_control"])
+
+
+def passed(result, threshold, strict=False):
+    fatal_warnings = warnings_are_fatal(result, strict) and result["warnings"]
     # Round so the documented 0.67 means "2 of 3": 2/3 is 0.6666... and used to fail.
     return round(result["score"], 2) >= threshold and not fatal_warnings
 
@@ -157,9 +161,9 @@ def main(argv=None):
         for g in result["groups"]:
             mark = "ok " if g["matched"] else "MISS"
             print(f"  [{mark}] {' | '.join(g['any_of'])}")
+        mark = "FAIL" if warnings_are_fatal(result, args.strict) else "warn"
         for w in result["warnings"]:
-            fatal = args.strict or result["negative_control"]
-            print(f"  [{'FAIL' if fatal else 'warn'}] mentions common misdiagnosis: '{w}'")
+            print(f"  [{mark}] mentions common misdiagnosis: '{w}'")
         for n in result["negated"]:
             print(f"  [info] ignored negated mention: '{n}'")
         print(f"  expected root cause: {sc['root_cause']}")

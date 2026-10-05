@@ -214,9 +214,12 @@ fawlty check-in sybil          # scales svc-91bc
 With `FAWLTY_BLIND=1`, log lines are rewritten into neutral service-like text
 (`cache size 128MiB`), persona names are scrubbed from anything unmatched
 (including tracebacks), the HTTP guests return neutral bodies, and O'Reilly's
-Events/Jobs use the alias and plausible reasons. Known gaps: diskfill's ballast
-file on the node is still called `fawlty-ballast.bin`, and the Chef's
-annotation key is still `fawlty.chef/...`.
+Events/Jobs use the alias and plausible reasons. The Chef's label and
+annotation keys are live object state that no log filter can hide, so in blind
+mode he defaults to flipping `release-channel` (declare `release-channel: stable`
+in Git, or set `FAWLTY_CHEF_LABEL` to something equally bland) and stamps a
+`reconciler/...` annotation. Known gap: diskfill's ballast file on the node is
+still called `fawlty-ballast.bin`.
 
 ## Tests
 

@@ -20,6 +20,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+from typing import TypeVar
+
+T = TypeVar("T")
 
 _PERSONA = re.compile(
     r"\b(basil|sybil|manuel|kitchen|waiter|major|polly|o'?reilly|chef|victim|fawlty"
@@ -38,6 +41,9 @@ _RULES: list[tuple[re.Pattern[str], str]] = [
         (r"^guest '[^']*' raised: (.*)$", r"unhandled exception: \1"),
         (r"^unknown guest .*$", "invalid configuration: unknown service type"),
         (r"^received signal (\d+).*$", r"received signal \1, shutting down"),
+        # O'Reilly and the Chef both degrade to log-only the same way; the
+        # persona tail after ";" is dropped.
+        (r"^no in-cluster API access \((.*)\);.*$", r"no in-cluster API access (\1); running without API"),
         # basil
         (r"^Basil is calm.*$", "service started"),
         (r"^Basil was asked to leave.*$", "shutting down"),
@@ -66,11 +72,9 @@ _RULES: list[tuple[re.Pattern[str], str]] = [
         (r"^Polly is warming up.*$", "service started"),
         # o'reilly
         (r"^O'Reilly reporting for duty in namespace (.*)$", r"controller started in namespace \1"),
-        (r"^no in-cluster API access \((.*)\); O'Reilly.*$", r"no in-cluster API access (\1); running without API"),
         # chef
         (r"^the Chef is in the kitchen, will rearrange Deployment (\S+).*$", r"reconciler started for Deployment \1"),
         (r"^rearranged Deployment (\S+).*drift #(\d+).*$", r"applied update #\2 to Deployment \1"),
-        (r"^no in-cluster API access \((.*)\); the Chef.*$", r"no in-cluster API access (\1)"),
         (r"^label '([^']*)' is not set on Deployment (\S+);.*$", r"label '\1' is not set on Deployment \2"),
         # victim
         (r"^victim listening on :(\d+).*$", r"listening on :\1"),
@@ -116,8 +120,8 @@ def rewrite(msg: str) -> str:
     return scrub(msg)
 
 
-def text(flavour: str, neutral: str) -> str:
-    """Pick the persona text normally, the neutral one in blind mode."""
+def text(flavour: T, neutral: T) -> T:
+    """Pick the persona value normally, the neutral one in blind mode."""
     return neutral if enabled() else flavour
 
 

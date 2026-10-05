@@ -53,6 +53,11 @@ class BlindModeTests(unittest.TestCase):
     def test_scrub_fallback(self):
         self.assertEqual(blind.rewrite("Sybil did something new"), "service did something new")
 
+    def test_no_api_access_rule_covers_both_guests(self):
+        for who in ("O'Reilly will only log, not spam the API", "the Chef can only sulk, not drift"):
+            self.assertEqual(blind.rewrite(f"no in-cluster API access (boom); {who}"),
+                             "no in-cluster API access (boom); running without API")
+
     def test_text_helper(self):
         os.environ["FAWLTY_BLIND"] = "1"
         try:
