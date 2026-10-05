@@ -15,7 +15,16 @@ from fawlty import common
 
 MIN_UPTIME_S = float(os.environ.get("FAWLTY_MIN_UPTIME_S", "5.0"))
 MAX_UPTIME_S = float(os.environ.get("FAWLTY_MAX_UPTIME_S", "40.0"))
-EXIT_CODES = (1, 2, 17, 42, 137, 139)
+# Plain application exit codes only. 137 (128+SIGKILL) and 139 (128+SIGSEGV)
+# used to be in this list, but they impersonate *other* faults: 137 is what an
+# OOMKill looks like and 139 is a segfault, so an agent that reasonably said
+# "OOMKilled" was graded as a misdiagnosis. Override with e.g.
+# FAWLTY_EXIT_CODES="1,137" if you deliberately want that ambiguity.
+EXIT_CODES = tuple(
+    code
+    for code in (int(c) for c in os.environ.get("FAWLTY_EXIT_CODES", "").split(",") if c.strip())
+    if 1 <= code <= 255
+) or (1, 2, 17, 42)
 
 
 def run() -> None:

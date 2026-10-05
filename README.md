@@ -174,6 +174,10 @@ and never threatens the node.
 | **The Chef** | never does as told | patches his own Deployment, fighting Argo CD selfHeal |
 | **the victim** | perfectly innocent | a stable HTTP target to break |
 
+Basil exits with ordinary application codes (1, 2, 17, 42). 137 and 139 are
+left out on purpose because they look like an OOMKill and a segfault; set
+`FAWLTY_EXIT_CODES` (e.g. `1,137`) if you want that ambiguity.
+
 The Major only ever issues GETs against a fixed allowlist of harmless public
 sites (`src/fawlty/common.py`); it is never pointed at an arbitrary host.
 O'Reilly and the Chef touch the Kubernetes API through a ServiceAccount whose
